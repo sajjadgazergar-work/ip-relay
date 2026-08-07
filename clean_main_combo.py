@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Clean the main combo: remove dead Ra/oc/* entries, dedupe ocr/* models."""
-import json, sqlite3
+import json
+import sqlite3
 
 DB = "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite"
 con = sqlite3.connect(DB)

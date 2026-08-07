@@ -5,7 +5,9 @@ The rotator listens on 127.0.0.1:18080 on the host; from inside the 9router
 container that's the docker bridge gateway 172.17.0.1. baseUrl is the API
 root ending in /v1 — 9router appends /chat/completions and /models itself.
 """
-import json, sqlite3, sys, uuid
+import json
+import sqlite3
+import uuid
 
 DB = "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite"
 NODE_ID = "openai-compatible-chat-oc-rotator"

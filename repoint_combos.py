@@ -5,7 +5,8 @@
 - oc/X      -> ocr/X      (9router built-in direct egress, burned VPS IP)
 - ocf/X     -> ocr/X      (opencodezen node, also direct)
 """
-import json, sqlite3
+import json
+import sqlite3
 
 DB = "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite"
 con = sqlite3.connect(DB)
