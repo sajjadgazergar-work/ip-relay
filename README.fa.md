@@ -26,24 +26,39 @@ ip-relay بین اپ‌های هوش مصنوعی شما و سرویس‌دهن�
 
 ## شروع سریع (غیر فنی)
 
-### گزینه A — Docker (ساده‌ترین)
+### یک دستور — نصب و به‌روزرسانی
+
+```bash
+curl -sL https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.sh | bash
+```
+
+همین! اسکریپت:
+- روی `/opt/ip-relay` نصب می‌کند (نصب جدید) **یا** خودکار یک نصب موجود را به‌روزرسانی می‌کند
+- یک venv پایتون می‌سازد، وابستگی‌ها را نصب می‌کند و سرویس systemd را راه می‌اندازد
+- **هیچ‌وقت تنظیمات شما را پاک نمی‌کند** (`.env`، `settings.json`) — اول از کد بکاپ می‌گیرد
+- با یک بررسی سلامت تمام می‌شود
+
+**شخصی‌سازی:**
+```bash
+# نصب در مسیر دیگر
+curl -sL ...install.sh | bash -s -- --dir /home/you/ip-relay
+# اجرا بدون systemd (دستی)
+curl -sL ...install.sh | bash -s -- --manual
+# اجرا با Docker
+curl -sL ...install.sh | bash -s -- --docker
+```
+
+سپس در مرورگر باز کنید: **http://localhost:8080** (یا IP سرور) — داشبورد را می‌بینید.
+
+### Docker — دستی
 
 ```bash
 docker run -d --name ip-relay -p 8080:8080 -e PORT=8080 ghcr.io/<you>/ip-relay
 ```
 
-سپس در مرورگر باز کنید: **http://localhost:8080** — داشبورد را می‌بینید.
+سپس در مرورگر باز کنید: **http://localhost:8080**
 
-### گزینه B — نصب یک‌باره روی سرور
-
-```bash
-# روی یک سرور تازه Ubuntu/Debian (با دسترسی root یا sudo):
-curl -L <release-url>/install.sh | bash
-```
-
-سپس در مرورگر باز کنید: **http://<ip-سرور-شما>:8080**
-
-### گزینه C — از سورس
+### از سورس (توسعه‌دهندگان)
 
 ```bash
 git clone https://github.com/sajjadgazergar-work/ip-relay
@@ -52,8 +67,6 @@ python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 uvicorn ip_relay:app --host 0.0.0.0 --port 8080
 ```
-
-سپس در مرورگر باز کنید: **http://localhost:8080**
 
 ## استفاده از داشبورد
 

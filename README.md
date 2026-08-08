@@ -30,7 +30,31 @@ ip-relay sits between your AI apps and an API provider whose free tier is limite
 
 ## Quickstart (non-technical)
 
-### Option A — Docker (easiest)
+### One command — install & update
+
+```bash
+curl -sL https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.sh | bash
+```
+
+That's it. The script:
+- Installs into `/opt/ip-relay` (fresh) **or** updates an existing install automatically
+- Creates a Python venv, installs deps, sets up a systemd service that auto-starts
+- **Never overwrites your config** (`.env`, `settings.json`) — backs up code first
+- Finishes with a health check
+
+**Customize:**
+```bash
+# install somewhere else
+curl -sL ...install.sh | bash -s -- --dir /home/you/ip-relay
+# run without systemd (manual)
+curl -sL ...install.sh | bash -s -- --manual
+# run with Docker instead
+curl -sL ...install.sh | bash -s -- --docker
+```
+
+Then open **http://localhost:8080** (or your server IP) — you'll see the dashboard.
+
+### Docker — manual
 
 ```bash
 docker run -d --name ip-relay -p 8080:8080 -e PORT=8080 ghcr.io/<you>/ip-relay
@@ -38,16 +62,7 @@ docker run -d --name ip-relay -p 8080:8080 -e PORT=8080 ghcr.io/<you>/ip-relay
 
 Then open **http://localhost:8080** in your browser — you'll see the dashboard.
 
-### Option B — One-shot server install
-
-```bash
-# on a fresh Ubuntu/Debian server (root or sudo):
-curl -L <release-url>/install.sh | bash
-```
-
-Then open **http://<your-server-ip>:8080** in your browser.
-
-### Option C — From source
+### From source (developers)
 
 ```bash
 git clone https://github.com/sajjadgazergar-work/ip-relay
@@ -56,20 +71,6 @@ python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 uvicorn ip_relay:app --host 0.0.0.0 --port 8080
 ```
-
-Then open **http://localhost:8080**.
-
-## Updating an existing install
-
-```bash
-# if installed via install.sh (default /opt/ip-relay):
-curl -sL https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/update.sh | bash
-
-# or with a custom install directory (e.g. a desktop checkout):
-curl -sL https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/update.sh | bash -s /path/to/your/install
-```
-
-The updater backs up your current `ip_relay.py`/`main.py` before overwriting, keeps your `settings.json`/`.env` untouched, syncs dependencies, and restarts the service if it's systemd-managed.
 
 ## Using the dashboard
 
