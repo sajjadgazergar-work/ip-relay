@@ -18,10 +18,17 @@ def fresh_state(monkeypatch):
     ip_relay.cooldowns = {}
     ip_relay.direct_burned_until = 0.0
     ip_relay.stats = {"requests": 0, "rotations": 0, "lane_failures": 0}
-    # deterministic, no direct lane in most tests
-    monkeypatch.setattr(ip_relay, "DIRECT_LANE", False)
-    monkeypatch.setattr(ip_relay, "UPSTREAM_API_KEY", "public")
-    monkeypatch.setattr(ip_relay, "UPSTREAM_BASE_URL", "https://upstream.test/v1")
+    # reset settings to defaults, no direct lane in most tests
+    ip_relay.apply_settings({
+        "upstream_base_url": "https://upstream.test/v1",
+        "upstream_api_key": "public",
+        "relay_api_key": "",
+        "proxy_refresh_sec": 600,
+        "proxy_test_concurrency": 12,
+        "proxy_max_candidates": 150,
+        "direct_lane": False,
+        "probe_model": "deepseek-v4-flash-free",
+    }, persist=False)
     yield
 
 
@@ -178,7 +185,7 @@ def test_relay_warming_503_when_no_lanes():
 
 def test_relay_auth_required(monkeypatch):
     import ip_relay as ir
-    monkeypatch.setattr(ir, "RELAY_API_KEY", "sekret")
+    ir.apply_settings({"relay_api_key": "sekret"}, persist=False)
     client = TestClient(ir.app)
     r = client.post("/v1/chat/completions", headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
@@ -189,7 +196,7 @@ def test_relay_auth_required(monkeypatch):
 
 def test_healthz_shape(monkeypatch):
     import ip_relay as ir
-    monkeypatch.setattr(ir, "RELAY_API_KEY", "")
+    ir.apply_settings({"relay_api_key": ""}, persist=False)
     ir.pool["proxies"] = ["1.2.3.4:8080"]
     client = TestClient(ir.app)
     r = client.get("/healthz")
@@ -202,7 +209,63 @@ def test_healthz_shape(monkeypatch):
 
 def test_chat_completions_invalid_json(monkeypatch):
     import ip_relay as ir
-    monkeypatch.setattr(ir, "RELAY_API_KEY", "")
+    ir.apply_settings({"relay_api_key": ""}, persist=False)
     client = TestClient(ir.app)
     r = client.post("/v1/chat/completions", content=b"not-json", headers={"Content-Type": "application/json"})
     assert r.status_code == 400
+
+
+# ── dashboard ─────────────────────────────────────────────────────
+
+def test_dashboard_html(monkeypatch):
+    import ip_relay as ir
+    client = TestClient(ir.app)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "ip-relay dashboard" in r.text
+    assert "Configuration" in r.text
+
+
+def test_dashboard_settings_api(monkeypatch):
+    import ip_relay as ir
+    ir.apply_settings({"relay_api_key": ""}, persist=False)
+    client = TestClient(ir.app)
+    r = client.get("/api/settings")
+    assert r.status_code == 200
+    data = r.json()
+    assert "upstream_base_url" in data
+    assert "upstream_api_key" in data
+    assert data["upstream_api_key"] != "public"  # masked
+
+
+def test_dashboard_settings_post(monkeypatch, tmp_path):
+    import ip_relay as ir
+    ir.apply_settings({"relay_api_key": ""}, persist=False)
+    ir.SETTINGS_FILE = str(tmp_path / "settings.json")
+    client = TestClient(ir.app)
+    r = client.post("/api/settings", json={"probe_model": "test-model-123"})
+    assert r.status_code == 200
+    assert r.json()["probe_model"] == "test-model-123"
+    # persisted to disk
+    import os
+    assert os.path.exists(ir.SETTINGS_FILE)
+    # masked key guard: sending a masked value back doesn't clobber
+    r2 = client.post("/api/settings", json={"relay_api_key": "sk-abc***"})
+    assert r2.status_code == 200
+
+
+def test_dashboard_logs_api(monkeypatch):
+    import ip_relay as ir
+    ir.LOG_RING.append("test log line")
+    client = TestClient(ir.app)
+    r = client.get("/api/logs")
+    assert r.status_code == 200
+    assert "test log line" in r.json()["logs"]
+
+
+def test_dashboard_refresh_api(monkeypatch):
+    import ip_relay as ir
+    client = TestClient(ir.app)
+    r = client.post("/api/refresh")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}

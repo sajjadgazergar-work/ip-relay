@@ -23,6 +23,7 @@
 #   PORT                listen port (default 8080)
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -32,18 +33,105 @@ import uuid
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 log = logging.getLogger("ip-relay")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", os.environ.get("OPENCODE_API_KEY", "public")).strip()
-UPSTREAM_BASE_URL = os.environ.get("UPSTREAM_BASE_URL", os.environ.get("OPENCODE_BASE_URL", "https://opencode.ai/zen/v1")).rstrip("/")
-RELAY_API_KEY = os.environ.get("RELAY_API_KEY", "").strip()
-PROXY_REFRESH_SEC = int(os.environ.get("PROXY_REFRESH_SEC", "600"))
-PROXY_TEST_CONCURRENCY = int(os.environ.get("PROXY_TEST_CONCURRENCY", "12"))
-PROXY_MAX_CANDIDATES = int(os.environ.get("PROXY_MAX_CANDIDATES", "150"))
-DIRECT_LANE = os.environ.get("DIRECT_LANE", "1") in ("1", "true", "yes")
+# ── settings (env as base, settings.json overlays; UI writes the file) ──
+SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "settings.json")
+DEFAULTS = {
+    "upstream_base_url": "https://opencode.ai/zen/v1",
+    "upstream_api_key": "public",
+    "relay_api_key": "",
+    "proxy_refresh_sec": 600,
+    "proxy_test_concurrency": 12,
+    "proxy_max_candidates": 150,
+    "direct_lane": True,
+    "probe_model": "deepseek-v4-flash-free",
+}
+settings: dict = dict(DEFAULTS)
+
+
+def load_settings() -> None:
+    """Start from env (legacy names accepted), then overlay settings.json so
+    UI changes persist across restarts."""
+    s = {
+        "upstream_base_url": os.environ.get("UPSTREAM_BASE_URL", os.environ.get("OPENCODE_BASE_URL", DEFAULTS["upstream_base_url"])).rstrip("/"),
+        "upstream_api_key": os.environ.get("UPSTREAM_API_KEY", os.environ.get("OPENCODE_API_KEY", DEFAULTS["upstream_api_key"])).strip(),
+        "relay_api_key": os.environ.get("RELAY_API_KEY", DEFAULTS["relay_api_key"]).strip(),
+        "proxy_refresh_sec": int(os.environ.get("PROXY_REFRESH_SEC", str(DEFAULTS["proxy_refresh_sec"]))),
+        "proxy_test_concurrency": int(os.environ.get("PROXY_TEST_CONCURRENCY", str(DEFAULTS["proxy_test_concurrency"]))),
+        "proxy_max_candidates": int(os.environ.get("PROXY_MAX_CANDIDATES", str(DEFAULTS["proxy_max_candidates"]))),
+        "direct_lane": os.environ.get("DIRECT_LANE", "1") in ("1", "true", "yes"),
+        "probe_model": os.environ.get("PROBE_MODEL", DEFAULTS["probe_model"]),
+    }
+    try:
+        with open(SETTINGS_FILE) as f:
+            s.update({k: v for k, v in json.load(f).items() if k in DEFAULTS})
+    except Exception:
+        pass
+    settings.update(s)
+    apply_settings(s, persist=False)
+
+
+def save_settings() -> None:
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        log.warning("could not save settings: %s", e)
+
+
+def apply_settings(new: dict, persist: bool = True) -> dict:
+    """Update runtime config from the UI/dashboard and sync module globals."""
+    global UPSTREAM_API_KEY, UPSTREAM_BASE_URL, RELAY_API_KEY
+    global PROXY_REFRESH_SEC, PROXY_TEST_CONCURRENCY, PROXY_MAX_CANDIDATES
+    global DIRECT_LANE, UPSTREAM_PROBE
+    for k, v in new.items():
+        if k in DEFAULTS:
+            settings[k] = v
+    UPSTREAM_API_KEY = str(settings["upstream_api_key"]).strip()
+    UPSTREAM_BASE_URL = str(settings["upstream_base_url"]).rstrip("/")
+    RELAY_API_KEY = str(settings["relay_api_key"]).strip()
+    PROXY_REFRESH_SEC = max(30, int(settings["proxy_refresh_sec"]))
+    PROXY_TEST_CONCURRENCY = max(1, int(settings["proxy_test_concurrency"]))
+    PROXY_MAX_CANDIDATES = max(5, int(settings["proxy_max_candidates"]))
+    DIRECT_LANE = bool(settings["direct_lane"])
+    UPSTREAM_PROBE = {
+        "model": settings["probe_model"],
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+        "stream": False,
+    }
+    if persist:
+        save_settings()
+    return dict(settings)
+
+
+def public_settings() -> dict:
+    """Settings safe to show in the UI (keys masked)."""
+    s = dict(settings)
+    if s.get("upstream_api_key"):
+        s["upstream_api_key"] = mask_key(str(s["upstream_api_key"]))
+    if s.get("relay_api_key"):
+        s["relay_api_key"] = mask_key(str(s["relay_api_key"]))
+    return s
+
+
+# ── log ring buffer (for the dashboard log viewer) ────────────────
+LOG_RING = collections.deque(maxlen=500)
+
+
+class RingHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            LOG_RING.append(self.format(record))
+        except Exception:
+            pass
+
+
+logging.getLogger().addHandler(RingHandler())
 
 PROXY_LIST_URLS = [
     "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text&timeout=5000",
@@ -61,13 +149,6 @@ cooldowns: dict[str, float] = {}
 direct_burned_until = 0.0
 # counters for observability
 stats = {"requests": 0, "rotations": 0, "lane_failures": 0}
-
-UPSTREAM_PROBE = {
-    "model": os.environ.get("PROBE_MODEL", "deepseek-v4-flash-free"),
-    "messages": [{"role": "user", "content": "hi"}],
-    "max_tokens": 1,
-    "stream": False,
-}
 
 
 def mask_key(k: str) -> str:
@@ -297,6 +378,7 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
 
 @app.on_event("startup")
 async def startup():
+    load_settings()
     asyncio.create_task(bg_refresh())
 
 
@@ -365,6 +447,208 @@ async def chat_completions(request: Request):
         # replay it as SSE so the client still sees a real stream.
         return StreamingResponse(safe_aiter(body), status_code=status, media_type=resp_headers.get("content-type", "text/event-stream"))
     return Response(content=body, status_code=status, media_type=resp_headers.get("content-type", "application/json"))
+
+
+# ── dashboard UI ──────────────────────────────────────────────────
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ip-relay dashboard</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --text:#e6e9ef; --muted:#8b93a3; --green:#3fb68b; --red:#e5484d; --amber:#f5a623; --blue:#4c8dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width:1000px; margin:0 auto; padding:24px 16px 80px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .big { font-size:28px; font-weight:700; }
+  .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pill.ok { background:rgba(63,182,139,.15); color:var(--green); }
+  .pill.warn { background:rgba(245,166,35,.15); color:var(--amber); }
+  .pill.err { background:rgba(229,72,77,.15); color:var(--red); }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:20px; }
+  .panel h2 { margin:0 0 14px; font-size:16px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:12px 0 4px; }
+  input[type=text],input[type=password],input[type=number],select { width:100%; padding:9px 12px; background:#0d0f13; border:1px solid var(--line); border-radius:8px; color:var(--text); font-size:14px; }
+  input:focus { outline:none; border-color:var(--blue); }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .check { display:flex; align-items:center; gap:8px; margin-top:14px; }
+  .check input { width:auto; }
+  .btn { background:var(--blue); color:#fff; border:none; border-radius:8px; padding:10px 18px; font-size:14px; font-weight:600; cursor:pointer; margin-top:16px; }
+  .btn:hover { opacity:.9; }
+  .btn.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  .btnrow { display:flex; gap:10px; }
+  .logbox { background:#0d0f13; border:1px solid var(--line); border-radius:8px; padding:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; line-height:1.6; max-height:280px; overflow:auto; white-space:pre-wrap; color:#aab3c5; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--green); color:#04120c; padding:10px 20px; border-radius:8px; font-weight:600; opacity:0; transition:opacity .3s; pointer-events:none; }
+  .toast.show { opacity:1; }
+  .muted { color:var(--muted); font-size:12px; }
+  .statrow { display:flex; justify-content:space-between; padding:4px 0; font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ip-relay dashboard</h1>
+  <div class="sub">Rotating egress relay for per-IP-quota APIs — status &amp; configuration</div>
+
+  <div class="grid">
+    <div class="card"><h3>Status</h3><span id="statusPill" class="pill warn">loading…</span></div>
+    <div class="card"><h3>Proxy pool</h3><div id="pool" class="big">–</div><div class="muted">working egress IPs</div></div>
+    <div class="card"><h3>Requests</h3><div id="requests" class="big">–</div><div class="muted">total served</div></div>
+    <div class="card"><h3>Rotations</h3><div id="rotations" class="big">–</div><div class="muted">quota hit → IP switched</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Configuration</h2>
+    <label>Upstream API URL</label>
+    <input type="text" id="cfg_upstream_base_url" placeholder="https://opencode.ai/zen/v1">
+    <label>Upstream API key</label>
+    <input type="password" id="cfg_upstream_api_key" placeholder="public">
+    <label>Relay API key (optional — protects this dashboard &amp; API)</label>
+    <input type="password" id="cfg_relay_api_key" placeholder="leave blank for no auth">
+    <div class="row">
+      <div>
+        <label>Proxy refresh interval (seconds)</label>
+        <input type="number" id="cfg_proxy_refresh_sec" min="30">
+      </div>
+      <div>
+        <label>Proxy test concurrency</label>
+        <input type="number" id="cfg_proxy_test_concurrency" min="1">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Max proxy candidates</label>
+        <input type="number" id="cfg_proxy_max_candidates" min="5">
+      </div>
+      <div>
+        <label>Probe model</label>
+        <input type="text" id="cfg_probe_model">
+      </div>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="cfg_direct_lane">
+      <label for="cfg_direct_lane" style="margin:0">Allow direct (server IP) egress</label>
+    </div>
+    <div class="btnrow">
+      <button class="btn" onclick="saveConfig()">Save configuration</button>
+      <button class="btn ghost" onclick="refreshPool()">Refresh proxy pool now</button>
+    </div>
+    <div class="muted" style="margin-top:10px">Changes apply immediately and persist across restarts.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Live log</h2>
+    <div class="logbox" id="logbox">loading…</div>
+  </div>
+
+  <div class="panel">
+    <h2>How to connect</h2>
+    <div class="muted" style="line-height:1.8">
+      Point any OpenAI-compatible client at <code style="color:#aab3c5">http://&lt;this-server&gt;:PORT/v1</code>.<br>
+      Example: <code style="color:#aab3c5">curl http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -H 'Authorization: Bearer public' -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}'</code>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script>
+async function jget(url) { const r = await fetch(url); if (!r.ok) throw new Error((await r.text()).slice(0,120)); return r.json(); }
+function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2500); }
+function setPill(el, ok) { el.className = 'pill ' + (ok ? 'ok' : 'err'); el.textContent = ok ? 'healthy' : 'degraded'; }
+async function refresh() {
+  try {
+    const h = await jget('/healthz');
+    setPill(document.getElementById('statusPill'), h.ok);
+    document.getElementById('pool').textContent = h.pool ?? '–';
+    document.getElementById('requests').textContent = (h.stats?.requests ?? 0).toLocaleString();
+    document.getElementById('rotations').textContent = (h.stats?.rotations ?? 0).toLocaleString();
+  } catch(e) { setPill(document.getElementById('statusPill'), false); }
+  try {
+    const s = await jget('/api/settings');
+    document.getElementById('cfg_upstream_base_url').value = s.upstream_base_url || '';
+    document.getElementById('cfg_upstream_api_key').value = s.upstream_api_key || '';
+    document.getElementById('cfg_relay_api_key').value = s.relay_api_key || '';
+    document.getElementById('cfg_proxy_refresh_sec').value = s.proxy_refresh_sec ?? 600;
+    document.getElementById('cfg_proxy_test_concurrency').value = s.proxy_test_concurrency ?? 12;
+    document.getElementById('cfg_proxy_max_candidates').value = s.proxy_max_candidates ?? 150;
+    document.getElementById('cfg_probe_model').value = s.probe_model || '';
+    document.getElementById('cfg_direct_lane').checked = !!s.direct_lane;
+  } catch(e) {}
+  try {
+    const l = await jget('/api/logs?n=100');
+    document.getElementById('logbox').textContent = (l.logs || []).join('\\n') || '(no logs yet)';
+  } catch(e) {}
+}
+async function saveConfig() {
+  const body = {
+    upstream_base_url: document.getElementById('cfg_upstream_base_url').value.trim(),
+    upstream_api_key: document.getElementById('cfg_upstream_api_key').value.trim(),
+    relay_api_key: document.getElementById('cfg_relay_api_key').value.trim(),
+    proxy_refresh_sec: parseInt(document.getElementById('cfg_proxy_refresh_sec').value || '600', 10),
+    proxy_test_concurrency: parseInt(document.getElementById('cfg_proxy_test_concurrency').value || '12', 10),
+    proxy_max_candidates: parseInt(document.getElementById('cfg_proxy_max_candidates').value || '150', 10),
+    probe_model: document.getElementById('cfg_probe_model').value.trim(),
+    direct_lane: document.getElementById('cfg_direct_lane').checked,
+  };
+  try {
+    const r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error((await r.text()).slice(0,120));
+    toast('Configuration saved ✓');
+    refresh();
+  } catch(e) { toast('Error: ' + e.message); }
+}
+async function refreshPool() {
+  try { await jget('/api/refresh'); toast('Pool refresh started ✓'); } catch(e) { toast('Error: ' + e.message); }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    return HTMLResponse(DASHBOARD_HTML)
+
+
+@app.get("/api/settings")
+async def get_settings_api():
+    return public_settings()
+
+
+@app.post("/api/settings")
+async def post_settings_api(request: Request):
+    try:
+        new = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    # only allow known keys; never let the UI blank the upstream key to ""
+    clean = {k: v for k, v in new.items() if k in DEFAULTS}
+    if "upstream_api_key" in clean and not str(clean["upstream_api_key"]).strip():
+        clean.pop("upstream_api_key")
+    if "relay_api_key" in clean and str(clean["relay_api_key"]).strip().startswith("***"):
+        clean.pop("relay_api_key")  # masked value sent back — don't overwrite
+    apply_settings(clean)
+    return public_settings()
+
+
+@app.get("/api/logs")
+async def logs_api(n: int = 100):
+    return {"logs": list(LOG_RING)[-n:]}
+
+
+@app.post("/api/refresh")
+async def refresh_api():
+    asyncio.create_task(refresh_pool(force=True))
+    return {"ok": True}
 
 
 if __name__ == "__main__":
