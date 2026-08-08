@@ -226,6 +226,27 @@ def test_dashboard_html(monkeypatch):
     assert "Configuration" in r.text
 
 
+def test_dashboard_login_flow(monkeypatch):
+    import ip_relay as ir
+    ir.apply_settings({"relay_api_key": "sekret"}, persist=False)
+    client = TestClient(ir.app)
+    # wrong key → 401
+    r = client.post("/login", json={"key": "wrong"})
+    assert r.status_code == 401
+    # right key → 200 + cookie
+    r = client.post("/login", json={"key": "sekret"})
+    assert r.status_code == 200
+    assert "ip_relay_auth" in r.cookies
+    cookie = r.cookies["ip_relay_auth"]
+    # data endpoint without cookie → 401 (fresh client, no cookies)
+    client2 = TestClient(ir.app)
+    r = client2.get("/api/settings")
+    assert r.status_code == 401
+    # with cookie → 200
+    r = client2.get("/api/settings", cookies={"ip_relay_auth": cookie})
+    assert r.status_code == 200
+
+
 def test_dashboard_settings_api(monkeypatch):
     import ip_relay as ir
     ir.apply_settings({"relay_api_key": ""}, persist=False)

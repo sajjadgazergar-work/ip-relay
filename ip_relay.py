@@ -411,6 +411,23 @@ def _check_relay_auth(request: Request) -> bool:
     return auth == f"Bearer {RELAY_API_KEY}" or auth == RELAY_API_KEY
 
 
+def _check_dashboard_auth(request: Request) -> bool:
+    """Dashboard data endpoints require the relay key via cookie (set at /login)
+    or Authorization header. If no relay key is set, dashboard is open."""
+    if not RELAY_API_KEY:
+        return True
+    auth = request.headers.get("authorization", "")
+    if auth == f"Bearer {RELAY_API_KEY}" or auth == RELAY_API_KEY:
+        return True
+    try:
+        import hashlib
+        cookie = request.cookies.get("ip_relay_auth", "")
+        expected = hashlib.sha256(f"ip-relay:{RELAY_API_KEY}".encode()).hexdigest()
+        return cookie == expected
+    except Exception:
+        return False
+
+
 @app.get("/v1/models")
 async def models(request: Request):
     if not _check_relay_auth(request):
@@ -558,7 +575,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="toast" id="toast"></div>
 <script>
-async function jget(url) { const r = await fetch(url); if (!r.ok) throw new Error((await r.text()).slice(0,120)); return r.json(); }
+async function jget(url) { const r = await fetch(url); if (r.status === 401) { window.location.href = '/login'; throw new Error('unauthorized'); } if (!r.ok) throw new Error((await r.text()).slice(0,120)); return r.json(); }
 function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2500); }
 function setPill(el, ok) { el.className = 'pill ' + (ok ? 'ok' : 'err'); el.textContent = ok ? 'healthy' : 'degraded'; }
 async function refresh() {
@@ -619,13 +636,85 @@ async def dashboard():
     return HTMLResponse(DASHBOARD_HTML)
 
 
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ip-relay — login</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --text:#e6e9ef; --muted:#8b93a3; --blue:#4c8dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:36px; width:340px; }
+  h1 { font-size:20px; margin:0 0 6px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:22px; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+  input[type=password] { width:100%; padding:10px 12px; background:#0d0f13; border:1px solid var(--line); border-radius:8px; color:var(--text); font-size:14px; }
+  input:focus { outline:none; border-color:var(--blue); }
+  button { width:100%; margin-top:16px; background:var(--blue); color:#fff; border:none; border-radius:8px; padding:11px; font-size:14px; font-weight:600; cursor:pointer; }
+  button:hover { opacity:.9; }
+  .err { color:#e5484d; font-size:13px; margin-top:10px; min-height:18px; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>ip-relay dashboard</h1>
+  <div class="sub">Enter the relay key to continue</div>
+  <form id="f">
+    <label>Relay key</label>
+    <input type="password" id="key" autofocus>
+    <div class="err" id="err"></div>
+    <button type="submit">Unlock</button>
+  </form>
+</div>
+<script>
+document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const key = document.getElementById('key').value.trim();
+  const r = await fetch('/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key}) });
+  if (r.ok) { window.location.href = '/'; }
+  else { document.getElementById('err').textContent = 'Wrong key'; }
+});
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page():
+    return HTMLResponse(LOGIN_HTML)
+
+
+@app.post("/login")
+async def login_submit(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    if not RELAY_API_KEY:
+        return {"ok": True}
+    if str(body.get("key", "")) == RELAY_API_KEY:
+        import hashlib
+        cookie = hashlib.sha256(f"ip-relay:{RELAY_API_KEY}".encode()).hexdigest()
+        resp = JSONResponse({"ok": True})
+        resp.set_cookie("ip_relay_auth", cookie, httponly=True, samesite="lax", max_age=60 * 60 * 24)
+        return resp
+    return JSONResponse({"error": "wrong key"}, status_code=401)
+
+
 @app.get("/api/settings")
-async def get_settings_api():
+async def get_settings_api(request: Request):
+    if not _check_dashboard_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     return public_settings()
 
 
 @app.post("/api/settings")
 async def post_settings_api(request: Request):
+    if not _check_dashboard_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         new = await request.json()
     except Exception:
@@ -641,12 +730,16 @@ async def post_settings_api(request: Request):
 
 
 @app.get("/api/logs")
-async def logs_api(n: int = 100):
+async def logs_api(request: Request, n: int = 100):
+    if not _check_dashboard_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     return {"logs": list(LOG_RING)[-n:]}
 
 
 @app.post("/api/refresh")
-async def refresh_api():
+async def refresh_api(request: Request):
+    if not _check_dashboard_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     asyncio.create_task(refresh_pool(force=True))
     return {"ok": True}
 
