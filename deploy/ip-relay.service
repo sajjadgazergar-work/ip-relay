@@ -1,0 +1,16 @@
+[Unit]
+Description=IP Relay OpenAI-compatible proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ip-relay
+ExecStart=/opt/ip-relay/.venv/bin/python -m ip_relay
+Restart=always
+RestartSec=5
+Environment=PORT=8080
+EnvironmentFile=/opt/ip-relay/.env
+
+[Install]
+WantedBy=multi-user.target

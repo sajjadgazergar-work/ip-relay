@@ -232,20 +232,18 @@ def is_quota_429(body: bytes, status: int) -> bool:
 
 
 async def safe_aiter(ait):
-    """Wrap an upstream raw-stream iterator: treat StreamClosed / client-abort
-    as a normal end-of-stream, not a crash. The relay is a pass-through, so
-    when the upstream closes (or the client went away) we just stop."""
-    try:
-        async for chunk in ait:
-            yield chunk
-    except (httpx.StreamClosed, httpx.RemoteProtocolError, asyncio.CancelledError):
-        return
-    except Exception:
-        try:
-            yield b"data: [DONE]\n\n"
-        except Exception:
-            pass
-        return
+    """Replay buffered upstream bytes as an SSE stream for the client.
+
+    The upstream body is fully buffered (crash-proof against flaky proxies);
+    when the client asked for stream=True we still need to hand back an
+    async iterator so FastAPI serves a proper text/event-stream. Replaying
+    the buffered body in chunks gives real SSE framing without any upstream
+    mid-stream crash risk.
+    """
+    data = ait if isinstance(ait, (bytes, bytearray)) else b"".join([c async for c in ait])
+    chunk_size = 4096
+    for i in range(0, len(data), chunk_size):
+        yield data[i:i + chunk_size]
 
 
 async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: float, method: str = "POST"):
@@ -267,14 +265,13 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                 url = f"{UPSTREAM_BASE_URL}/{path}"
                 body_kw = {"json": payload} if method == "POST" else {}
                 if stream:
-                    async with client.stream(method, url, headers=headers, **body_kw) as resp:
-                        if resp.status_code == 429:
-                            body = await resp.aread()
-                            if is_quota_429(body, 429):
-                                mark_burn(proxy, label)
-                                last_err = (429, body)
-                                continue
-                        return resp.status_code, dict(resp.headers), resp.aiter_raw()
+                    resp = await client.request(method, url, headers=headers, **body_kw)
+                    body = await resp.aread()
+                    if resp.status_code == 429 and is_quota_429(body, 429):
+                        mark_burn(proxy, label)
+                        last_err = (429, body)
+                        continue
+                    return resp.status_code, dict(resp.headers), body
                 else:
                     resp = await client.request(method, url, headers=headers, **body_kw)
                     body = resp.content
@@ -364,6 +361,8 @@ async def chat_completions(request: Request):
     status, resp_headers, body = await relay(payload, "chat/completions", stream, headers, timeout)
 
     if stream and status < 300:
+        # body is fully buffered bytes from the upstream (crash-proof);
+        # replay it as SSE so the client still sees a real stream.
         return StreamingResponse(safe_aiter(body), status_code=status, media_type=resp_headers.get("content-type", "text/event-stream"))
     return Response(content=body, status_code=status, media_type=resp_headers.get("content-type", "application/json"))
 
