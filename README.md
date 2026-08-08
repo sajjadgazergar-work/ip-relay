@@ -2,7 +2,7 @@
 
 **Turn one free API key into a whole pool of free API keys — automatically.**
 
-[🇮🇷 راهنمای فارسی](README.fa.md) · [Dashboard screenshot](docs/dashboard.png)
+[🇮🇷 راهنمای فارسی](README.fa.md) · [Benchmark — does it work?](BENCHMARK.md) · [Dashboard screenshot](docs/dashboard.png)
 
 ip-relay sits between your AI apps and an API provider whose free tier is limited **per IP address**. Instead of hitting the limit after a few dozen requests, ip-relay routes each request through a rotating pool of proxies — so every request can come from a fresh IP, with its own fresh quota.
 

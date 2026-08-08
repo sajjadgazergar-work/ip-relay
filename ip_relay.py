@@ -47,6 +47,8 @@ DEFAULTS = {
     "proxy_refresh_sec": 600,
     "proxy_test_concurrency": 12,
     "proxy_max_candidates": 150,
+    "proxy_min_pool": 10,
+    "relay_proxy_timeout": 25,
     "direct_lane": True,
     "probe_model": "deepseek-v4-flash-free",
 }
@@ -63,6 +65,8 @@ def load_settings() -> None:
         "proxy_refresh_sec": int(os.environ.get("PROXY_REFRESH_SEC", str(DEFAULTS["proxy_refresh_sec"]))),
         "proxy_test_concurrency": int(os.environ.get("PROXY_TEST_CONCURRENCY", str(DEFAULTS["proxy_test_concurrency"]))),
         "proxy_max_candidates": int(os.environ.get("PROXY_MAX_CANDIDATES", str(DEFAULTS["proxy_max_candidates"]))),
+        "proxy_min_pool": int(os.environ.get("PROXY_MIN_POOL", str(DEFAULTS["proxy_min_pool"]))),
+        "relay_proxy_timeout": int(os.environ.get("RELAY_PROXY_TIMEOUT", str(DEFAULTS["relay_proxy_timeout"]))),
         "direct_lane": os.environ.get("DIRECT_LANE", "1") in ("1", "true", "yes"),
         "probe_model": os.environ.get("PROBE_MODEL", DEFAULTS["probe_model"]),
     }
@@ -87,7 +91,7 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     """Update runtime config from the UI/dashboard and sync module globals."""
     global UPSTREAM_API_KEY, UPSTREAM_BASE_URL, RELAY_API_KEY
     global PROXY_REFRESH_SEC, PROXY_TEST_CONCURRENCY, PROXY_MAX_CANDIDATES
-    global DIRECT_LANE, UPSTREAM_PROBE
+    global PROXY_MIN_POOL, RELAY_PROXY_TIMEOUT, DIRECT_LANE, UPSTREAM_PROBE
     for k, v in new.items():
         if k in DEFAULTS:
             settings[k] = v
@@ -97,6 +101,8 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     PROXY_REFRESH_SEC = max(30, int(settings["proxy_refresh_sec"]))
     PROXY_TEST_CONCURRENCY = max(1, int(settings["proxy_test_concurrency"]))
     PROXY_MAX_CANDIDATES = max(5, int(settings["proxy_max_candidates"]))
+    PROXY_MIN_POOL = int(settings.get("proxy_min_pool", 10))
+    RELAY_PROXY_TIMEOUT = max(5, int(settings.get("relay_proxy_timeout", 25)))
     DIRECT_LANE = bool(settings["direct_lane"])
     UPSTREAM_PROBE = {
         "model": settings["probe_model"],
@@ -337,7 +343,7 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
     last_err = None
     for proxy, label in lanes:
         try:
-            client_kwargs = {"timeout": httpx.Timeout(timeout, connect=10)}
+            client_kwargs = {"timeout": httpx.Timeout(min(timeout, RELAY_PROXY_TIMEOUT), connect=10)}
             if proxy:
                 client_kwargs["proxy"] = f"http://{proxy}"
             else:
@@ -385,10 +391,19 @@ async def startup():
 async def bg_refresh():
     while True:
         try:
-            await refresh_pool(force=True)
+            # if the pool is getting thin, refresh every 30s instead of waiting
+            # the full interval — keeps up with IP burn under sustained load
+            async with pool["lock"]:
+                low = len([p for p in pool["proxies"] if cooldowns.get(p, 0) <= time.time()]) < PROXY_MIN_POOL
+            if low:
+                await refresh_pool(force=True)
+                await asyncio.sleep(30)
+            else:
+                await refresh_pool(force=False)
+                await asyncio.sleep(PROXY_REFRESH_SEC)
         except Exception as e:
             log.warning("bg refresh failed: %s", e)
-        await asyncio.sleep(PROXY_REFRESH_SEC)
+            await asyncio.sleep(30)
 
 
 @app.get("/healthz")
