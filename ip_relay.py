@@ -45,8 +45,8 @@ DEFAULTS = {
     "upstream_api_key": "public",
     "relay_api_key": "",
     "proxy_refresh_sec": 600,
-    "proxy_test_concurrency": 12,
-    "proxy_max_candidates": 150,
+    "proxy_test_concurrency": 20,
+    "proxy_max_candidates": 400,
     "proxy_min_pool": 10,
     "relay_proxy_timeout": 25,
     "direct_lane": True,
@@ -228,14 +228,19 @@ async def refresh_pool(force: bool = False) -> None:
     good: list[str] = []
     sem = asyncio.Semaphore(PROXY_TEST_CONCURRENCY)
     done: set[str] = set()
+    last_commit = time.time()
 
     async def test_and_commit(p: str):
+        nonlocal last_commit
         async with sem:
             ok = await proxy_works(p)
             if ok:
                 good.append(p)
             done.add(p)
-            if len(done) % 20 == 0 or len(done) == len(candidates):
+            # keep old pool serving while sweeping; only commit when the
+            # sweep is done or at a coarse progress checkpoint
+            if time.time() - last_commit > 10 or len(done) == len(candidates):
+                last_commit = time.time()
                 async with pool["lock"]:
                     pool["proxies"] = [g for g in good if cooldowns.get(g, 0) <= time.time()]
                     pool["updated"] = time.time()
@@ -386,6 +391,8 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
 async def startup():
     load_settings()
     asyncio.create_task(bg_refresh())
+    # warm the models cache immediately so /v1/models never 503s on first hit
+    asyncio.create_task(get_models_cached())
 
 
 async def bg_refresh():
@@ -410,12 +417,21 @@ async def bg_refresh():
 async def healthz():
     async with pool["lock"]:
         alive = len([p for p in pool["proxies"] if cooldowns.get(p, 0) <= time.time()])
+    models: list[str] = []
+    try:
+        if _models_cache["body"]:
+            data = json.loads(_models_cache["body"])
+            models = [m.get("id", "") for m in data.get("data", [])][:5]
+    except Exception:
+        pass
     return {
         "ok": True,
         "pool": alive,
         "updated": pool["updated"],
         "key": mask_key(UPSTREAM_API_KEY),
         "stats": stats,
+        "models": models,
+        "models_cached": bool(_models_cache["body"]),
     }
 
 
@@ -443,15 +459,38 @@ def _check_dashboard_auth(request: Request) -> bool:
         return False
 
 
+# static model list cache — models don't need the proxy pool (metadata only)
+# fetched directly from upstream and cached for MODELS_CACHE_SEC
+MODELS_CACHE_SEC = 3600
+_models_cache: dict = {"updated": 0.0, "status": 503, "body": b"", "content_type": "application/json"}
+
+
+async def get_models_cached() -> tuple[int, str, bytes]:
+    """Return (status, content_type, body) for /v1/models — direct upstream
+    fetch (no proxy rotation needed), cached for an hour."""
+    if time.time() - _models_cache["updated"] < MODELS_CACHE_SEC and _models_cache["body"]:
+        return _models_cache["status"], _models_cache["content_type"], _models_cache["body"]
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10)) as client:
+            resp = await client.get(f"{UPSTREAM_BASE_URL}/models", headers={"Authorization": f"Bearer {UPSTREAM_API_KEY}"})
+            body = resp.content
+            ct = resp.headers.get("content-type", "application/json")
+            _models_cache.update({"updated": time.time(), "status": resp.status_code, "body": body, "content_type": ct})
+            return resp.status_code, ct, body
+    except Exception as e:
+        log.warning("models fetch failed: %s", e)
+        # serve stale cache if we have it
+        if _models_cache["body"]:
+            return _models_cache["status"], _models_cache["content_type"], _models_cache["body"]
+        return 503, "application/json", json.dumps({"error": {"message": "models fetch failed", "type": "models_unavailable"}}).encode()
+
+
 @app.get("/v1/models")
 async def models(request: Request):
     if not _check_relay_auth(request):
         return JSONResponse({"error": {"message": "invalid relay key", "type": "invalid_relay_key"}}, status_code=401)
-    headers = build_upstream_headers(request.headers.get("authorization"), request)
-    status, resp_headers, body = await relay({}, "models", False, headers, 20, method="GET")
-    if status == 200:
-        return Response(content=body, media_type=resp_headers.get("content-type", "application/json"))
-    return Response(content=body, status_code=status, media_type="application/json")
+    status, ct, body = await get_models_cached()
+    return Response(content=body, media_type=ct, status_code=status)
 
 
 @app.post("/v1/chat/completions")
@@ -676,6 +715,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     opacity:0; transition:transform .35s cubic-bezier(.2,.7,.3,1), opacity .35s; pointer-events:none; }
   .toast.show { transform:translate(-50%,0); opacity:1; }
 
+  /* guide */
+  .guide-intro { font-size:13px; color:var(--muted); margin:0 0 16px; line-height:1.6; }
+  .code-inline { font-family:var(--mono); font-size:12px; color:var(--cyan); background:rgba(34,211,238,.08);
+    padding:2px 7px; border-radius:6px; }
+  .guide-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .guide-block { background:rgba(6,8,15,.5); border:1px solid var(--line); border-radius:12px; padding:14px; position:relative; }
+  .guide-block h3 { margin:0 0 10px; font-size:12.5px; color:var(--text); font-weight:600; }
+  .code-block { margin:0 0 10px; font-family:var(--mono); font-size:11.5px; line-height:1.7; color:#aab3c5;
+    white-space:pre-wrap; word-break:break-all; }
+  .btn.mini { padding:5px 12px; font-size:11px; border-radius:7px; position:absolute; top:10px; right:10px; }
+  .models-list { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .model-chip { font-family:var(--mono); font-size:11.5px; color:var(--cyan); background:rgba(34,211,238,.07);
+    border:1px solid rgba(34,211,238,.2); border-radius:8px; padding:5px 11px; cursor:pointer;
+    transition:background .2s, border-color .2s; }
+  .model-chip:hover { background:rgba(34,211,238,.16); border-color:rgba(34,211,238,.5); }
+  .model-chip.used { color:var(--green); border-color:rgba(52,211,153,.4); }
+  @media (max-width:920px) { .guide-grid { grid-template-columns:1fr; } }
+
   @media (max-width:920px) {
     .stats { grid-template-columns:repeat(2,1fr); }
     .main-grid { grid-template-columns:1fr; }
@@ -821,6 +878,62 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </section>
   </div>
 
+  <section class="panel guide" style="margin-top:16px">
+    <div class="panel-h"><h2>How to connect</h2><span class="hint" id="guideModelCount"></span></div>
+    <p class="guide-intro">This relay speaks the OpenAI API. Point any client at <code class="code-inline" id="relayBase">http://&lt;your-server&gt;:8080/v1</code> and use one of the models below (no prefix — the relay strips any).</p>
+
+    <div class="guide-grid">
+      <div class="guide-block">
+        <h3>📋 curl</h3>
+        <pre class="code-block" id="codeCurl">curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}'</pre>
+        <button class="btn ghost mini" data-copy="codeCurl">Copy</button>
+      </div>
+      <div class="guide-block">
+        <h3>🤖 Claude Code</h3>
+        <pre class="code-block"># add the model to your config
+# model: deepseek-v4-flash-free
+# ANTHROPIC_BASE_URL=http://localhost:8080/v1
+# ANTHROPIC_AUTH_TOKEN=public
+
+# in settings.json (Claude Code):
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8080/v1",
+    "ANTHROPIC_AUTH_TOKEN": "public"
+  }
+}</pre>
+      </div>
+      <div class="guide-block">
+        <h3>🐍 OpenAI SDK (Python)</h3>
+        <pre class="code-block">from openai import OpenAI
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="public",
+)
+r = client.chat.completions.create(
+    model="deepseek-v4-flash-free",
+    messages=[{"role":"user","content":"hi"}],
+)
+print(r.choices[0].message.content)</pre>
+      </div>
+      <div class="guide-block">
+        <h3>🔀 Through 9router</h3>
+        <pre class="code-block"># add the relay as a provider, then use the
+# provider prefix in front of the model:
+#   ocr/deepseek-v4-flash-free
+# (prefix comes from your 9router provider setup,
+#  not from the relay itself)</pre>
+      </div>
+    </div>
+
+    <div class="models-row">
+      <div class="panel-h" style="margin-top:14px"><h2>Available models</h2><span class="hint">from upstream, cached</span></div>
+      <div id="modelsList" class="models-list">loading…</div>
+    </div>
+  </section>
+
   <footer>
     <span>ip-relay v0.4.0</span><span class="dotsep">·</span>
     <a href="https://github.com/sajjadgazergar-work/ip-relay" target="_blank" rel="noopener">github</a><span class="dotsep">·</span>
@@ -952,10 +1065,34 @@ async function refresh(){
     if(lastReq !== null) pushSpark(Math.max(0, (h.stats.requests||0) - lastReq));
     lastReq = h.stats ? (h.stats.requests||0) : 0;
     renderMesh(h.pool || 0);
+    renderModels(h.models || []);
     const logs = await jget('/api/logs?n=100');
     renderLogs(logs.logs || []);
   }catch(e){ setPill($('statusPill'),'err','offline'); }
 }
+
+function renderModels(models){
+  const el = $('modelsList'); if(!el) return;
+  if(!models.length){ el.innerHTML = '<span class="muted">no models yet — pool warming</span>'; return; }
+  el.innerHTML = '';
+  models.forEach(m=>{
+    const chip = document.createElement('span');
+    chip.className = 'model-chip';
+    chip.textContent = m;
+    chip.title = 'Click to copy: ' + m;
+    chip.addEventListener('click', ()=>{ copyText(m); toast('Copied: ' + m); });
+    el.appendChild(chip);
+  });
+  $('guideModelCount').textContent = models.length + ' models';
+}
+
+function copyText(t){
+  if(navigator.clipboard){ navigator.clipboard.writeText(t).catch(()=>{}); }
+  else { const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+}
+document.querySelectorAll('[data-copy]').forEach(b=>{
+  b.addEventListener('click', ()=>{ const el=$(b.dataset.copy); if(el) copyText(el.textContent.trim()); toast('Copied ✓'); });
+});
 
 function ageTick(){
   if(!h || !h.updated) return;
