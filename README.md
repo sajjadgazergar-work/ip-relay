@@ -109,7 +109,13 @@ Point any OpenAI-compatible client at your server:
 ```
 Base URL: http://<your-server>:8080/v1
 API key:  whatever you set as the relay key (or leave blank)
+Model:    deepseek-v4-flash-free   (no prefix — see note below)
 ```
+
+> **⚠️ Prefix confusion (important):**
+> - **Directly to the relay** — use the **bare model name** (`deepseek-v4-flash-free`, `claude-fable-5`, ...). The relay strips any prefix, so `whatever/deepseek-v4-flash-free` also works.
+> - **Through 9router** (or another aggregator) — the model gets the **provider prefix you configured** in the aggregator, e.g. `ocr/deepseek-v4-flash-free`. That prefix lives in 9router's config, **not** in the relay.
+> - **Claude Code** — set `ANTHROPIC_BASE_URL=http://<server>:8080/v1` and `ANTHROPIC_AUTH_TOKEN=public`, and the model id is the bare name.
 
 Example with curl:
 

@@ -107,7 +107,13 @@ uvicorn ip_relay:app --host 0.0.0.0 --port 8080
 ```
 Base URL: http://<سرور-شما>:8080/v1
 API key:  هر چیزی که به‌عنوان کلید رله تنظیم کردید (یا خالی)
+Model:    deepseek-v4-flash-free   (بدون پیشوند — به نکته زیر توجه کنید)
 ```
+
+> **⚠️ سردرگمی پیشوند (مهم):**
+> - **مستقیم به رله** — از **نام مدل ساده** استفاده کنید (`deepseek-v4-flash-free`، `claude-fable-5` و...). رله هر پیشوندی را حذف می‌کند، پس `whatever/deepseek-v4-flash-free` هم کار می‌کند.
+> - **از طریق 9router** (یا تجمیع‌کننده دیگر) — مدل **پیشوند provider** که در تجمیع‌کننده تنظیم کرده‌اید را می‌گیرد، مثلاً `ocr/deepseek-v4-flash-free`. آن پیشوند در کانفیگ 9router است، **نه** در رله.
+> - **Claude Code** — `ANTHROPIC_BASE_URL=http://<سرور>:8080/v1` و `ANTHROPIC_AUTH_TOKEN=public` را تنظیم کنید؛ شناسه مدل همان نام ساده است.
 
 مثال با curl:
 
