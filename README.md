@@ -54,6 +54,26 @@ curl -sL ...install.sh | bash -s -- --docker
 
 Then open **http://localhost:8080** (or your server IP) — you'll see the dashboard.
 
+### Windows (PowerShell)
+
+```powershell
+# download the installer (PowerShell — note: `curl` here is Invoke-WebRequest, so use irm):
+irm https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.ps1 -OutFile install.ps1
+
+# run it (no admin needed):
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Or all-in-one:
+
+```powershell
+iex (irm https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.ps1)
+```
+
+The script installs into `%LOCALAPPDATA%\ip-relay`, creates a venv, installs deps, and leaves you a **`start-ip-relay.bat`** you can double-click to run. Flags: `-Dir D:\ip-relay`, `-Manual` (no launcher), `-Docker`.
+
+> ⚠️ If you pasted the `curl -sL ...` Linux command into PowerShell, that's why it failed — PowerShell aliases `curl` to `Invoke-WebRequest`, which doesn't have `-sL`. Use the `irm` form above.
+
 ### Docker — manual
 
 ```bash

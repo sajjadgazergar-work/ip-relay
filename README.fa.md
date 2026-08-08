@@ -50,6 +50,26 @@ curl -sL ...install.sh | bash -s -- --docker
 
 سپس در مرورگر باز کنید: **http://localhost:8080** (یا IP سرور) — داشبورد را می‌بینید.
 
+### ویندوز (PowerShell)
+
+```powershell
+# دانلود نصب‌کننده (توجه: در PowerShell دستور curl در واقع Invoke-WebRequest است، پس از irm استفاده کنید):
+irm https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.ps1 -OutFile install.ps1
+
+# اجرا (بدون نیاز به ادمین):
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+یا یک‌خطی:
+
+```powershell
+iex (irm https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.ps1)
+```
+
+اسکریپت در `%LOCALAPPDATA%\ip-relay` نصب می‌کند، venv می‌سازد، وابستگی‌ها را نصب می‌کند و یک فایل **`start-ip-relay.bat`** می‌سازد که با دابل‌کلیک اجرا می‌شود. پرچم‌ها: `-Dir D:\ip-relay`، `-Manual` (بدون لانچر)، `-Docker`.
+
+> ⚠️ اگر دستور لینوکسی `curl -sL ...` را در PowerShell چسبانده‌اید، به همین دلیل خطا داد — PowerShell نام `curl` را به `Invoke-WebRequest` تغییر می‌دهد که پارامتر `-sL` ندارد. از فرم `irm` بالا استفاده کنید.
+
 ### Docker — دستی
 
 ```bash
