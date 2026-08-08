@@ -3,7 +3,7 @@
   ip-relay one-shot install / update for Windows (PowerShell 5.1+).
 .DESCRIPTION
   Installs ip-relay into $env:LOCALAPPDATA\ip-relay (or -Dir), creates a
-  venv, installs deps. Creates a scheduled task (start on boot) by default,
+  venv, installs deps. Creates a start-ip-relay.bat launcher by default,
   or runs manually with -Manual. Safe: never touches existing config,
   backs up code before overwriting.
 .EXAMPLE
