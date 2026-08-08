@@ -490,155 +490,531 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ip-relay dashboard</title>
 <style>
-  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --text:#e6e9ef; --muted:#8b93a3; --green:#3fb68b; --red:#e5484d; --amber:#f5a623; --blue:#4c8dff; }
+  :root {
+    --bg0:#06080f; --bg1:#0a0f1c;
+    --surface:rgba(15,21,36,.78);
+    --surface2:#111828;
+    --line:rgba(148,163,184,.13);
+    --text:#e9edf5; --muted:#8794ab; --faint:#5b6780;
+    --cyan:#22d3ee; --violet:#8b5cf6; --magenta:#e879f9;
+    --green:#34d399; --amber:#fbbf24; --red:#f87171;
+    --grad:linear-gradient(135deg,var(--cyan),var(--violet) 55%,var(--magenta));
+    --mono:ui-monospace,'SF Mono','Cascadia Code','JetBrains Mono',Menlo,Consolas,monospace;
+  }
   * { box-sizing:border-box; }
-  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); }
-  .wrap { max-width:1000px; margin:0 auto; padding:24px 16px 80px; }
-  h1 { font-size:22px; margin:0 0 4px; }
-  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin-bottom:20px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
-  .card h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
-  .big { font-size:28px; font-weight:700; }
-  .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; }
-  .pill.ok { background:rgba(63,182,139,.15); color:var(--green); }
-  .pill.warn { background:rgba(245,166,35,.15); color:var(--amber); }
-  .pill.err { background:rgba(229,72,77,.15); color:var(--red); }
-  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:20px; }
-  .panel h2 { margin:0 0 14px; font-size:16px; }
-  label { display:block; font-size:12px; color:var(--muted); margin:12px 0 4px; }
-  input[type=text],input[type=password],input[type=number],select { width:100%; padding:9px 12px; background:#0d0f13; border:1px solid var(--line); border-radius:8px; color:var(--text); font-size:14px; }
-  input:focus { outline:none; border-color:var(--blue); }
-  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .check { display:flex; align-items:center; gap:8px; margin-top:14px; }
-  .check input { width:auto; }
-  .btn { background:var(--blue); color:#fff; border:none; border-radius:8px; padding:10px 18px; font-size:14px; font-weight:600; cursor:pointer; margin-top:16px; }
-  .btn:hover { opacity:.9; }
+  html { scrollbar-color: #1c2436 transparent; }
+  body {
+    margin:0; min-height:100vh; color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+    background:var(--bg0); overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection { background:rgba(139,92,246,.35); }
+
+  /* ── aurora background ── */
+  .aurora { position:fixed; inset:0; z-index:-2; overflow:hidden; background:
+    radial-gradient(1200px 800px at 80% -10%, rgba(139,92,246,.14), transparent 60%),
+    radial-gradient(1000px 700px at -10% 110%, rgba(34,211,238,.10), transparent 60%),
+    var(--bg0); }
+  .blob { position:absolute; border-radius:50%; filter:blur(90px); opacity:.5; will-change:transform; }
+  .blob.a { width:560px; height:560px; top:-180px; left:-140px;
+    background:radial-gradient(circle at 35% 35%, #0ea5e9, transparent 62%);
+    animation:driftA 30s ease-in-out infinite alternate; }
+  .blob.b { width:640px; height:640px; top:20%; right:-260px;
+    background:radial-gradient(circle at 60% 40%, #7c3aed, transparent 62%);
+    animation:driftB 38s ease-in-out infinite alternate; }
+  .blob.c { width:420px; height:420px; bottom:-160px; left:28%;
+    background:radial-gradient(circle at 50% 50%, #c026d3, transparent 62%);
+    animation:driftC 46s ease-in-out infinite alternate; }
+  @keyframes driftA { to { transform:translate(240px,160px) scale(1.18); } }
+  @keyframes driftB { to { transform:translate(-180px,-120px) scale(1.1); } }
+  @keyframes driftC { to { transform:translate(120px,-140px) scale(1.22); } }
+  .gridlines { position:fixed; inset:0; z-index:-1; pointer-events:none;
+    background-image:linear-gradient(rgba(148,163,184,.045) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(148,163,184,.045) 1px,transparent 1px);
+    background-size:46px 46px;
+    -webkit-mask-image:radial-gradient(ellipse 90% 70% at 50% 0%, #000 35%, transparent 78%);
+            mask-image:radial-gradient(ellipse 90% 70% at 50% 0%, #000 35%, transparent 78%); }
+
+  .wrap { max-width:1140px; margin:0 auto; padding:26px 20px 70px; }
+
+  /* ── header ── */
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:22px; }
+  .brand { display:flex; align-items:center; gap:14px; }
+  .logo-ring { position:relative; width:40px; height:40px; border-radius:50%; flex:none;
+    background:conic-gradient(from 0deg, transparent 0 296deg, var(--cyan) 296deg 322deg, var(--violet) 322deg 348deg, var(--magenta) 348deg 360deg);
+    -webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 3.5px), #000 calc(100% - 2.5px));
+            mask:radial-gradient(farthest-side, transparent calc(100% - 3.5px), #000 calc(100% - 2.5px));
+    animation:spin 7s linear infinite; }
+  .logo-ring::after { content:''; position:absolute; inset:50% auto auto 50%; width:8px; height:8px; border-radius:50%;
+    background:var(--cyan); transform:translate(-50%,-50%); box-shadow:0 0 12px 2px rgba(34,211,238,.8); }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .brand h1 { margin:0; font-size:21px; letter-spacing:-.02em; }
+  .brand .tag { font-size:10.5px; text-transform:uppercase; letter-spacing:.18em; color:var(--muted); }
+  .hdr-right { display:flex; align-items:center; gap:14px; }
+  .uptime { font-family:var(--mono); font-size:12px; color:var(--muted); }
+
+  /* ── pills ── */
+  .pill { display:inline-flex; align-items:center; gap:8px; padding:6px 14px; border-radius:999px;
+    font-size:12px; font-weight:600; letter-spacing:.03em; border:1px solid transparent; }
+  .pill::before { content:''; width:7px; height:7px; border-radius:50%; background:currentColor;
+    box-shadow:0 0 8px 1px currentColor; animation:pulse 2.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.45; transform:scale(.82); } }
+  .pill.ok { color:var(--green); background:rgba(52,211,153,.1); border-color:rgba(52,211,153,.25); }
+  .pill.warn { color:var(--amber); background:rgba(251,191,36,.1); border-color:rgba(251,191,36,.25); }
+  .pill.err { color:var(--red); background:rgba(248,113,113,.1); border-color:rgba(248,113,113,.25); }
+
+  /* ── stat cards ── */
+  .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:16px; }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:18px 18px 16px;
+    position:relative; overflow:hidden; backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    box-shadow:0 10px 30px -18px rgba(0,0,0,.8), inset 0 1px 0 rgba(255,255,255,.05);
+    transition:transform .25s cubic-bezier(.2,.7,.3,1), border-color .25s, box-shadow .25s; }
+  .card::before { content:''; position:absolute; inset:0 0 auto 0; height:1px;
+    background:linear-gradient(90deg, transparent, rgba(148,163,184,.35), transparent); opacity:.5; }
+  .card:hover { transform:translateY(-3px); border-color:rgba(34,211,238,.35);
+    box-shadow:0 18px 40px -20px rgba(0,0,0,.9), 0 0 24px -10px rgba(34,211,238,.35), inset 0 1px 0 rgba(255,255,255,.07); }
+  .stat { animation:rise .55s cubic-bezier(.2,.7,.3,1) both; animation-delay:calc(var(--i)*70ms); }
+  @keyframes rise { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:none; } }
+  .stat-top { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .lbl { font-size:10.5px; text-transform:uppercase; letter-spacing:.16em; color:var(--muted); font-weight:600; }
+  .ic { width:30px; height:30px; border-radius:9px; display:grid; place-items:center;
+    background:rgba(148,163,184,.08); border:1px solid var(--line); }
+  .ic svg { width:16px; height:16px; }
+  .ic.cyan { color:var(--cyan); } .ic.violet { color:var(--violet); } .ic.mag { color:var(--magenta); } .ic.grn { color:var(--green); }
+  .big { font-family:var(--mono); font-size:30px; font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; line-height:1; }
+  .sub { color:var(--muted); font-size:11.5px; margin-top:8px; }
+  .spark-wrap { margin-top:10px; }
+
+  /* ── panels ── */
+  .panel { background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:20px;
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    box-shadow:0 10px 30px -18px rgba(0,0,0,.8), inset 0 1px 0 rgba(255,255,255,.05); }
+  .panel-h { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:6px; }
+  .panel-h h2 { margin:0; font-size:14px; font-weight:700; letter-spacing:.01em; }
+  .panel-h .hint { font-size:11px; color:var(--muted); font-family:var(--mono); }
+
+  /* mesh */
+  .mesh-panel { margin-bottom:16px; }
+  .mesh-wrap { position:relative; }
+  .mesh-wrap svg { display:block; width:100%; height:auto; }
+  .mesh-core { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    text-align:center; pointer-events:none; }
+  .mesh-core .ring { position:absolute; inset:-26px -34px; border-radius:50%;
+    border:1.5px dashed rgba(34,211,238,.45); animation:spin 16s linear infinite; }
+  .mesh-core .count { font-family:var(--mono); font-size:34px; font-weight:700; line-height:1; }
+  .mesh-core .cap { font-size:10px; text-transform:uppercase; letter-spacing:.16em; color:var(--muted); margin-top:4px; }
+  .mesh-core.empty .count { color:var(--amber); }
+  .mesh-core.empty .ring { border-color:rgba(251,191,36,.5); animation:pulse 1.6s ease-in-out infinite; }
+  .mesh-note { text-align:center; font-size:11px; color:var(--faint); margin-top:2px; font-family:var(--mono); }
+
+  /* main grid */
+  .main-grid { display:grid; grid-template-columns:1.35fr 1fr; gap:16px; align-items:start; }
+  .main-grid > .panel { min-width:0; }
+
+  /* log */
+  .logbox { background:rgba(6,8,15,.72); border:1px solid var(--line); border-radius:12px;
+    padding:12px 14px; font-family:var(--mono); font-size:11.5px; line-height:1.75;
+    height:330px; overflow:auto; white-space:pre-wrap; color:#aab3c5; position:relative; }
+  .logbox::after { content:''; position:sticky; bottom:-12px; display:block; height:24px; pointer-events:none;
+    background:linear-gradient(transparent, rgba(6,8,15,.55)); }
+  .ll { animation:logIn .3s ease both; }
+  @keyframes logIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+  .ll.info { color:#9bd6e8; } .ll.warn { color:#f5c97b; } .ll.err { color:#f39c9c; }
+  .ll .ts { color:#5b6780; }
+
+  /* config */
+  .cfg-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px 12px; margin-top:12px; }
+  .cfg-grid label { display:block; font-size:11px; color:var(--muted); margin-bottom:4px; letter-spacing:.04em; }
+  .cfg-grid input, .cfg-grid select { width:100%; padding:9px 11px; background:rgba(6,8,15,.7);
+    border:1px solid var(--line); border-radius:10px; color:var(--text); font-size:13px;
+    font-family:var(--mono); transition:border-color .2s, box-shadow .2s; }
+  .cfg-grid input:focus, .cfg-grid select:focus { outline:none; border-color:var(--cyan);
+    box-shadow:0 0 0 3px rgba(34,211,238,.14); }
+  .cfg-grid input::placeholder { color:#4b5568; }
+  .cfg-grid .wide { grid-column:1 / -1; }
+
+  /* toggle */
+  .switch-row { display:flex; align-items:center; justify-content:space-between; margin-top:16px;
+    padding:10px 2px 2px; border-top:1px solid var(--line); }
+  .switch-row .swlbl { font-size:12.5px; color:var(--text); display:flex; align-items:center; gap:8px; }
+  .switch-row .swlbl small { color:var(--muted); font-weight:400; }
+  .switch { position:relative; display:inline-block; width:42px; height:23px; flex:none; }
+  .switch input { opacity:0; width:0; height:0; }
+  .slider { position:absolute; cursor:pointer; inset:0; border-radius:999px; background:#1a2233;
+    border:1px solid var(--line); transition:.25s; }
+  .slider::before { content:''; position:absolute; width:17px; height:17px; left:2px; top:2px;
+    border-radius:50%; background:#8a93a6; transition:.25s cubic-bezier(.2,.7,.3,1); }
+  .switch input:checked + .slider { background:linear-gradient(135deg,var(--cyan),var(--violet)); border-color:transparent; }
+  .switch input:checked + .slider::before { transform:translateX(19px); background:#fff; box-shadow:0 0 10px rgba(34,211,238,.7); }
+  .switch input:focus-visible + .slider { box-shadow:0 0 0 3px rgba(34,211,238,.25); }
+
+  .btnrow { display:flex; gap:10px; margin-top:18px; }
+  .btn { border:none; border-radius:11px; padding:11px 18px; font-size:13.5px; font-weight:600;
+    cursor:pointer; transition:transform .18s, box-shadow .18s, opacity .18s; position:relative; overflow:hidden; }
+  .btn:active { transform:scale(.97); }
+  .btn.primary { background:var(--grad); color:#fff; box-shadow:0 8px 22px -10px rgba(139,92,246,.7); }
+  .btn.primary::after { content:''; position:absolute; top:0; left:-80%; width:50%; height:100%;
+    background:linear-gradient(100deg, transparent, rgba(255,255,255,.35), transparent);
+    transform:skewX(-20deg); transition:left .5s; }
+  .btn.primary:hover::after { left:130%; }
+  .btn.primary:hover { transform:translateY(-1px); box-shadow:0 12px 26px -10px rgba(139,92,246,.85); }
   .btn.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
-  .btnrow { display:flex; gap:10px; }
-  .logbox { background:#0d0f13; border:1px solid var(--line); border-radius:8px; padding:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; line-height:1.6; max-height:280px; overflow:auto; white-space:pre-wrap; color:#aab3c5; }
-  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--green); color:#04120c; padding:10px 20px; border-radius:8px; font-weight:600; opacity:0; transition:opacity .3s; pointer-events:none; }
-  .toast.show { opacity:1; }
-  .muted { color:var(--muted); font-size:12px; }
-  .statrow { display:flex; justify-content:space-between; padding:4px 0; font-size:13px; }
+  .btn.ghost:hover { border-color:rgba(34,211,238,.5); color:var(--cyan); }
+  .btn.saved { background:linear-gradient(135deg,#10b981,#059669); }
+  .btn:disabled { opacity:.55; cursor:not-allowed; }
+
+  footer { margin-top:26px; display:flex; align-items:center; justify-content:center; gap:10px;
+    font-size:11.5px; color:var(--muted); font-family:var(--mono); }
+  footer a { color:var(--muted); text-decoration:none; border-bottom:1px dashed rgba(148,163,184,.35); }
+  footer a:hover { color:var(--cyan); }
+  .dotsep { color:#3a4458; }
+
+  .toast { position:fixed; bottom:24px; left:50%; transform:translate(-50%, 80px); z-index:50;
+    background:linear-gradient(135deg,#0ea5e9,#7c3aed); color:#fff; padding:12px 22px; border-radius:12px;
+    font-size:13.5px; font-weight:600; box-shadow:0 16px 40px -12px rgba(0,0,0,.7);
+    opacity:0; transition:transform .35s cubic-bezier(.2,.7,.3,1), opacity .35s; pointer-events:none; }
+  .toast.show { transform:translate(-50%,0); opacity:1; }
+
+  @media (max-width:920px) {
+    .stats { grid-template-columns:repeat(2,1fr); }
+    .main-grid { grid-template-columns:1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation:none !important; transition:none !important; }
+  }
 </style>
 </head>
 <body>
+<div class="aurora"><div class="blob a"></div><div class="blob b"></div><div class="blob c"></div></div>
+<div class="gridlines"></div>
+
 <div class="wrap">
-  <h1>ip-relay dashboard</h1>
-  <div class="sub">Rotating egress relay for per-IP-quota APIs — status &amp; configuration</div>
-
-  <div class="grid">
-    <div class="card"><h3>Status</h3><span id="statusPill" class="pill warn">loading…</span></div>
-    <div class="card"><h3>Proxy pool</h3><div id="pool" class="big">–</div><div class="muted">working egress IPs</div></div>
-    <div class="card"><h3>Requests</h3><div id="requests" class="big">–</div><div class="muted">total served</div></div>
-    <div class="card"><h3>Rotations</h3><div id="rotations" class="big">–</div><div class="muted">quota hit → IP switched</div></div>
-  </div>
-
-  <div class="panel">
-    <h2>Configuration</h2>
-    <label>Upstream API URL</label>
-    <input type="text" id="cfg_upstream_base_url" placeholder="https://opencode.ai/zen/v1">
-    <label>Upstream API key</label>
-    <input type="password" id="cfg_upstream_api_key" placeholder="public">
-    <label>Relay API key (optional — protects this dashboard &amp; API)</label>
-    <input type="password" id="cfg_relay_api_key" placeholder="leave blank for no auth">
-    <div class="row">
+  <header>
+    <div class="brand">
+      <div class="logo-ring"></div>
       <div>
-        <label>Proxy refresh interval (seconds)</label>
-        <input type="number" id="cfg_proxy_refresh_sec" min="30">
-      </div>
-      <div>
-        <label>Proxy test concurrency</label>
-        <input type="number" id="cfg_proxy_test_concurrency" min="1">
+        <h1>ip-relay</h1>
+        <div class="tag">egress control plane</div>
       </div>
     </div>
-    <div class="row">
-      <div>
-        <label>Max proxy candidates</label>
-        <input type="number" id="cfg_proxy_max_candidates" min="5">
+    <div class="hdr-right">
+      <span class="uptime" id="poolAge">pool warming…</span>
+      <span id="statusPill" class="pill warn">loading</span>
+    </div>
+  </header>
+
+  <section class="stats">
+    <div class="card stat" style="--i:0">
+      <div class="stat-top"><span class="lbl">Proxy pool</span><span class="ic cyan">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.2"/><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/><path d="M12 3.8v2.4M12 17.8v2.4M3.8 12h2.4M17.8 12h2.4"/></svg>
+      </span></div>
+      <div class="big" id="pool">–</div>
+      <div class="sub">working egress IPs</div>
+    </div>
+    <div class="card stat" style="--i:1">
+      <div class="stat-top"><span class="lbl">Requests</span><span class="ic violet">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+      </span></div>
+      <div class="big" id="requests">–</div>
+      <div class="sub">total served</div>
+      <div class="spark-wrap"><canvas id="spark" width="140" height="34" style="width:140px;height:34px"></canvas></div>
+    </div>
+    <div class="card stat" style="--i:2">
+      <div class="stat-top"><span class="lbl">Rotations</span><span class="ic mag">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a8 8 0 0 1 14.9-2M20 14a8 8 0 0 1-14.9 2"/><path d="M19 4v4h-4M5 20v-4h4"/></svg>
+      </span></div>
+      <div class="big" id="rotations">–</div>
+      <div class="sub">quota hit → IP switched</div>
+    </div>
+    <div class="card stat" style="--i:3">
+      <div class="stat-top"><span class="lbl">Lane failures</span><span class="ic grn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 1 0-9-9"/><path d="M3 12h6M3 12l3-3M3 12l3 3"/></svg>
+      </span></div>
+      <div class="big" id="laneFailures">–</div>
+      <div class="sub">dead lanes parked</div>
+    </div>
+  </section>
+
+  <section class="panel mesh-panel">
+    <div class="panel-h"><h2>Egress mesh</h2><span class="hint" id="meshHint">live traffic through rotating IPs</span></div>
+    <div class="mesh-wrap">
+      <svg id="mesh" viewBox="0 0 800 210" preserveAspectRatio="xMidYMid meet" role="img" aria-label="egress mesh visualization">
+        <defs>
+          <linearGradient id="laneGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#22d3ee" stop-opacity=".8"/>
+            <stop offset=".55" stop-color="#8b5cf6" stop-opacity=".8"/>
+            <stop offset="1" stop-color="#e879f9" stop-opacity=".8"/>
+          </linearGradient>
+          <radialGradient id="dotGrad" cx=".5" cy=".5" r=".5">
+            <stop offset="0" stop-color="#cffafe"/>
+            <stop offset="1" stop-color="#22d3ee"/>
+          </radialGradient>
+          <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur stdDeviation="3" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <g fill="none" stroke="url(#laneGrad)" stroke-width="1.4" opacity=".5">
+          <path d="M 96 105 C 210 50, 300 50, 400 105 S 590 160, 704 105" opacity=".55"/>
+          <path d="M 96 105 C 210 40, 300 40, 400 105 S 590 170, 704 105" opacity=".22"/>
+          <path d="M 96 105 C 210 60, 300 60, 400 105 S 590 150, 704 105" opacity=".22"/>
+        </g>
+        <g id="dots"></g>
+        <g font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#8794ab">
+          <circle cx="96" cy="105" r="9" fill="none" stroke="#22d3ee" stroke-width="1.4" opacity=".9"/>
+          <circle cx="96" cy="105" r="2.6" fill="#22d3ee"/>
+          <text x="96" y="136" text-anchor="middle">client</text>
+          <circle cx="704" cy="105" r="9" fill="none" stroke="#e879f9" stroke-width="1.4" opacity=".9"/>
+          <circle cx="704" cy="105" r="2.6" fill="#e879f9"/>
+          <text x="704" y="136" text-anchor="middle">upstream</text>
+        </g>
+      </svg>
+      <div class="mesh-core" id="meshCore">
+        <div class="ring"></div>
+        <div class="count" id="meshCount">0</div>
+        <div class="cap">egress IPs</div>
       </div>
-      <div>
-        <label>Probe model</label>
-        <input type="text" id="cfg_probe_model">
+    </div>
+    <div class="mesh-note" id="meshNote">each dot = a request flowing through a fresh proxy IP</div>
+  </section>
+
+  <div class="main-grid">
+    <section class="panel">
+      <div class="panel-h"><h2>Live log</h2><span class="hint" id="logCount"></span></div>
+      <div class="logbox" id="logbox">(no logs yet — pool is warming)</div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-h"><h2>Configuration</h2><span class="hint">applies live</span></div>
+      <div class="cfg-grid">
+        <label class="wide">Upstream API URL
+          <input type="text" id="cfg_upstream_base_url" placeholder="https://opencode.ai/zen/v1" spellcheck="false">
+        </label>
+        <label>Upstream key
+          <input type="text" id="cfg_upstream_api_key" placeholder="public" spellcheck="false">
+        </label>
+        <label>Relay key (protects dashboard)
+          <input type="password" id="cfg_relay_api_key" placeholder="leave empty for open" autocomplete="off">
+        </label>
+        <label>Refresh interval (s)
+          <input type="number" id="cfg_proxy_refresh_sec" min="30" step="30">
+        </label>
+        <label>Test concurrency
+          <input type="number" id="cfg_proxy_test_concurrency" min="1">
+        </label>
+        <label>Max candidates
+          <input type="number" id="cfg_proxy_max_candidates" min="5">
+        </label>
+        <label>Probe model
+          <input type="text" id="cfg_probe_model" placeholder="deepseek-v4-flash-free" spellcheck="false">
+        </label>
       </div>
-    </div>
-    <div class="check">
-      <input type="checkbox" id="cfg_direct_lane">
-      <label for="cfg_direct_lane" style="margin:0">Allow direct (server IP) egress</label>
-    </div>
-    <div class="btnrow">
-      <button class="btn" onclick="saveConfig()">Save configuration</button>
-      <button class="btn ghost" onclick="refreshPool()">Refresh proxy pool now</button>
-    </div>
-    <div class="muted" style="margin-top:10px">Changes apply immediately and persist across restarts.</div>
+      <div class="switch-row">
+        <span class="swlbl">Direct lane <small>use this server's own IP as a fallback</small></span>
+        <label class="switch"><input type="checkbox" id="cfg_direct_lane"><span class="slider"></span></label>
+      </div>
+      <div class="btnrow">
+        <button id="saveBtn" class="btn primary">Save changes</button>
+        <button id="refreshBtn" class="btn ghost">Refresh pool</button>
+      </div>
+    </section>
   </div>
 
-  <div class="panel">
-    <h2>Live log</h2>
-    <div class="logbox" id="logbox">loading…</div>
-  </div>
-
-  <div class="panel">
-    <h2>How to connect</h2>
-    <div class="muted" style="line-height:1.8">
-      Point any OpenAI-compatible client at <code style="color:#aab3c5">http://&lt;this-server&gt;:PORT/v1</code>.<br>
-      Example: <code style="color:#aab3c5">curl http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -H 'Authorization: Bearer public' -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}'</code>
-    </div>
-  </div>
+  <footer>
+    <span>ip-relay v0.4.0</span><span class="dotsep">·</span>
+    <a href="https://github.com/sajjadgazergar-work/ip-relay" target="_blank" rel="noopener">github</a><span class="dotsep">·</span>
+    <span id="footState">—</span>
+  </footer>
 </div>
 
 <div class="toast" id="toast"></div>
+
 <script>
-async function jget(url) { const r = await fetch(url); if (r.status === 401) { window.location.href = '/login'; throw new Error('unauthorized'); } if (!r.ok) throw new Error((await r.text()).slice(0,120)); return r.json(); }
-function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2500); }
-function setPill(el, ok) { el.className = 'pill ' + (ok ? 'ok' : 'err'); el.textContent = ok ? 'healthy' : 'degraded'; }
-async function refresh() {
-  try {
-    const h = await jget('/healthz');
-    setPill(document.getElementById('statusPill'), h.ok);
-    document.getElementById('pool').textContent = h.pool ?? '–';
-    document.getElementById('requests').textContent = (h.stats?.requests ?? 0).toLocaleString();
-    document.getElementById('rotations').textContent = (h.stats?.rotations ?? 0).toLocaleString();
-  } catch(e) { setPill(document.getElementById('statusPill'), false); }
-  try {
+function $(id){ return document.getElementById(id); }
+function esc(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2600); }
+
+async function jget(url){ const r=await fetch(url); if(r.status===401){ window.location.href='/login'; throw new Error('unauthorized'); } if(!r.ok) throw new Error((await r.text()).slice(0,120)); return r.json(); }
+
+function setPill(el, state, label){
+  el.className = 'pill ' + state;
+  el.textContent = label;
+}
+
+function countUp(el, to, dur){
+  dur = dur || 600;
+  const from = parseInt(String(el.textContent).replace(/,/g,'')) || 0;
+  if(from === to){ el.textContent = to.toLocaleString(); return; }
+  const t0 = performance.now();
+  function tick(t){
+    const p = Math.min(1, (t - t0) / dur);
+    const v = Math.round(from + (to - from) * (1 - Math.pow(1 - p, 3)));
+    el.textContent = v.toLocaleString();
+    if(p < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+// sparkline of request rate
+const sparkData = [];
+let lastReq = null;
+function drawSpark(){
+  const cv = $('spark'); if(!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = 140, H = 34;
+  cv.width = W*dpr; cv.height = H*dpr; cv.style.width = W+'px'; cv.style.height = H+'px';
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr); ctx.clearRect(0,0,W,H);
+  if(sparkData.length < 2) return;
+  const max = Math.max.apply(null, sparkData.concat([1]));
+  ctx.beginPath();
+  sparkData.forEach((v,i)=>{
+    const x = i/(sparkData.length-1)*W;
+    const y = H - 3 - (v/max)*(H-8);
+    i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+  });
+  const g = ctx.createLinearGradient(0,0,W,0);
+  g.addColorStop(0,'#22d3ee'); g.addColorStop(1,'#e879f9');
+  ctx.strokeStyle = g; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.stroke();
+  const last = sparkData[sparkData.length-1];
+  const lx = (sparkData.length-1)/(sparkData.length-1)*W;
+  const ly = H - 3 - (last/max)*(H-8);
+  ctx.lineTo(lx, H); ctx.lineTo(0, H); ctx.closePath();
+  const fg = ctx.createLinearGradient(0,0,0,H);
+  fg.addColorStop(0,'rgba(34,211,238,.28)'); fg.addColorStop(1,'rgba(34,211,238,0)');
+  ctx.fillStyle = fg; ctx.fill();
+}
+function pushSpark(v){ sparkData.push(v); if(sparkData.length > 30) sparkData.shift(); drawSpark(); }
+
+// mesh animation — one glowing dot per request lane, count = pool size
+const MESH_PATH = 'M 96 105 C 210 50, 300 50, 400 105 S 590 160, 704 105';
+function renderMesh(pool){
+  const g = $('dots'), core = $('meshCore'), cnt = $('meshCount'); if(!g) return;
+  cnt.textContent = pool;
+  const want = Math.max(0, Math.min(pool, 26));
+  while(g.children.length > want) g.removeChild(g.lastChild);
+  while(g.children.length < want){
+    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('r', 3.2);
+    c.setAttribute('fill', 'url(#dotGrad)');
+    c.setAttribute('filter', 'url(#glow)');
+    const am = document.createElementNS('http://www.w3.org/2000/svg','animateMotion');
+    am.setAttribute('dur','2.6s');
+    am.setAttribute('repeatCount','indefinite');
+    am.setAttribute('path', MESH_PATH);
+    am.setAttribute('begin', (-g.children.length * 0.12) + 's');
+    c.appendChild(am);
+    g.appendChild(c);
+  }
+  core.classList.toggle('empty', pool === 0);
+  $('meshNote').textContent = pool === 0
+    ? 'warming up — pool empty, retrying…'
+    : 'each dot = a request flowing through a fresh proxy IP';
+}
+
+// log rendering
+let logShown = 0;
+function lineClass(l){
+  if(/ERROR|Traceback|Exception/.test(l)) return 'err';
+  if(/WARNING|WARN /.test(l)) return 'warn';
+  if(/429|502|503|500|504/.test(l)) return 'warn';
+  return 'info';
+}
+function renderLogs(lines){
+  const box = $('logbox'); if(!box) return;
+  if(lines.length < logShown){ box.innerHTML=''; logShown=0; }
+  const fresh = lines.slice(logShown);
+  logShown = lines.length;
+  const frag = document.createDocumentFragment();
+  fresh.forEach(l=>{
+    const div = document.createElement('div');
+    div.className = 'll ' + lineClass(l);
+    div.textContent = l;
+    frag.appendChild(div);
+  });
+  box.appendChild(frag);
+  while(box.children.length > 220) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+  $('logCount').textContent = logShown + ' lines';
+}
+
+let h = null;
+async function refresh(){
+  try{
+    h = await jget('/healthz');
+    const ok = !!h.ok;
+    setPill($('statusPill'), ok ? 'ok' : (h.pool === 0 ? 'warn' : 'err'),
+            ok ? 'healthy' : (h.pool === 0 ? 'warming' : 'degraded'));
+    countUp($('pool'), h.pool || 0);
+    countUp($('requests'), h.stats ? (h.stats.requests||0) : 0);
+    countUp($('rotations'), h.stats ? (h.stats.rotations||0) : 0);
+    countUp($('laneFailures'), h.stats ? (h.stats.lane_failures||0) : 0);
+    if(lastReq !== null) pushSpark(Math.max(0, (h.stats.requests||0) - lastReq));
+    lastReq = h.stats ? (h.stats.requests||0) : 0;
+    renderMesh(h.pool || 0);
+    const logs = await jget('/api/logs?n=100');
+    renderLogs(logs.logs || []);
+  }catch(e){ setPill($('statusPill'),'err','offline'); }
+}
+
+function ageTick(){
+  if(!h || !h.updated) return;
+  const s = Math.max(0, Math.round(Date.now()/1000 - h.updated));
+  $('poolAge').textContent = 'pool updated ' + s + 's ago';
+  $('footState').textContent = h.key ? ('upstream key: ' + h.key) : 'no upstream key';
+}
+setInterval(ageTick, 1000);
+
+async function loadSettings(){
+  try{
     const s = await jget('/api/settings');
-    document.getElementById('cfg_upstream_base_url').value = s.upstream_base_url || '';
-    document.getElementById('cfg_upstream_api_key').value = s.upstream_api_key || '';
-    document.getElementById('cfg_relay_api_key').value = s.relay_api_key || '';
-    document.getElementById('cfg_proxy_refresh_sec').value = s.proxy_refresh_sec ?? 600;
-    document.getElementById('cfg_proxy_test_concurrency').value = s.proxy_test_concurrency ?? 12;
-    document.getElementById('cfg_proxy_max_candidates').value = s.proxy_max_candidates ?? 150;
-    document.getElementById('cfg_probe_model').value = s.probe_model || '';
-    document.getElementById('cfg_direct_lane').checked = !!s.direct_lane;
-  } catch(e) {}
-  try {
-    const l = await jget('/api/logs?n=100');
-    document.getElementById('logbox').textContent = (l.logs || []).join('\\n') || '(no logs yet)';
-  } catch(e) {}
+    $('cfg_upstream_base_url').value = s.upstream_base_url || '';
+    $('cfg_upstream_api_key').value = s.upstream_api_key || '';
+    $('cfg_relay_api_key').value = s.relay_api_key || '';
+    $('cfg_proxy_refresh_sec').value = s.proxy_refresh_sec ?? 600;
+    $('cfg_proxy_test_concurrency').value = s.proxy_test_concurrency ?? 12;
+    $('cfg_proxy_max_candidates').value = s.proxy_max_candidates ?? 150;
+    $('cfg_probe_model').value = s.probe_model || '';
+    $('cfg_direct_lane').checked = !!s.direct_lane;
+  }catch(e){}
 }
-async function saveConfig() {
+
+async function saveConfig(){
   const body = {
-    upstream_base_url: document.getElementById('cfg_upstream_base_url').value.trim(),
-    upstream_api_key: document.getElementById('cfg_upstream_api_key').value.trim(),
-    relay_api_key: document.getElementById('cfg_relay_api_key').value.trim(),
-    proxy_refresh_sec: parseInt(document.getElementById('cfg_proxy_refresh_sec').value || '600', 10),
-    proxy_test_concurrency: parseInt(document.getElementById('cfg_proxy_test_concurrency').value || '12', 10),
-    proxy_max_candidates: parseInt(document.getElementById('cfg_proxy_max_candidates').value || '150', 10),
-    probe_model: document.getElementById('cfg_probe_model').value.trim(),
-    direct_lane: document.getElementById('cfg_direct_lane').checked,
+    upstream_base_url: $('cfg_upstream_base_url').value.trim(),
+    upstream_api_key: $('cfg_upstream_api_key').value.trim(),
+    relay_api_key: $('cfg_relay_api_key').value.trim(),
+    proxy_refresh_sec: parseInt($('cfg_proxy_refresh_sec').value || '600', 10),
+    proxy_test_concurrency: parseInt($('cfg_proxy_test_concurrency').value || '12', 10),
+    proxy_max_candidates: parseInt($('cfg_proxy_max_candidates').value || '150', 10),
+    probe_model: $('cfg_probe_model').value.trim(),
+    direct_lane: $('cfg_direct_lane').checked,
   };
-  try {
-    const r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    if (!r.ok) throw new Error((await r.text()).slice(0,120));
-    toast('Configuration saved ✓');
+  const btn = $('saveBtn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try{
+    const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if(!r.ok) throw new Error((await r.text()).slice(0,120));
+    btn.classList.add('saved'); btn.textContent = 'Saved ✓';
+    setTimeout(()=>{ btn.classList.remove('saved'); btn.textContent = 'Save changes'; btn.disabled = false; }, 1600);
+    toast('Configuration saved');
     refresh();
-  } catch(e) { toast('Error: ' + e.message); }
+  }catch(e){
+    btn.textContent = 'Save changes'; btn.disabled = false;
+    toast('Error: ' + e.message);
+  }
 }
-async function refreshPool() {
-  try { await jget('/api/refresh'); toast('Pool refresh started ✓'); } catch(e) { toast('Error: ' + e.message); }
+
+async function refreshPool(){
+  try{ await jget('/api/refresh'); toast('Pool refresh started'); }
+  catch(e){ toast('Error: ' + e.message); }
 }
+
+$('saveBtn').addEventListener('click', saveConfig);
+$('refreshBtn').addEventListener('click', refreshPool);
+
 refresh();
+loadSettings();
 setInterval(refresh, 5000);
 </script>
 </body>
