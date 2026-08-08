@@ -59,6 +59,18 @@ uvicorn ip_relay:app --host 0.0.0.0 --port 8080
 
 Then open **http://localhost:8080**.
 
+## Updating an existing install
+
+```bash
+# if installed via install.sh (default /opt/ip-relay):
+curl -sL https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/update.sh | bash
+
+# or with a custom install directory (e.g. a desktop checkout):
+curl -sL https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/update.sh | bash -s /path/to/your/install
+```
+
+The updater backs up your current `ip_relay.py`/`main.py` before overwriting, keeps your `settings.json`/`.env` untouched, syncs dependencies, and restarts the service if it's systemd-managed.
+
 ## Using the dashboard
 
 The web UI at `/` shows you:
