@@ -775,6 +775,19 @@ tr:hover td {
       </div>
     </div>
     
+    <!-- Live Status Banner -->
+    <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 10px 16px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-family: var(--font-mono); color: #e4e4e7; backdrop-filter: blur(10px);">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="color: var(--text-muted);">ENGINE STATE:</span>
+        <span id="engineState" style="color: #60a5fa; font-weight: bold; text-transform: uppercase;">IDLE</span>
+      </div>
+      <div style="display: flex; gap: 16px; align-items: center;">
+        <div>QUEUE: <span id="engineQueue" style="color: #facc15;">0</span></div>
+        <div>TESTED: <span id="engineTested" style="color: #a78bfa;">0</span></div>
+        <div>WARM: <span id="engineWarm" style="color: #4ade80;">0</span></div>
+      </div>
+    </div>
+    
     <div style="position: relative; width: 100%; height: 210px; background: rgba(0, 0, 0, 0.4); border-radius: 16px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.05);">
       <canvas id="networkCanvas" style="width: 100%; height: 100%; display: block;"></canvas>
     </div>
@@ -910,15 +923,39 @@ tr:hover td {
             </label>
           </div>
           
-          <button type="submit" class="action-btn">Apply changes</button>
+          <div style="display: flex; gap: 12px; margin-top: 24px;">
+            <button type="submit" class="action-btn" id="btnApply" style="flex: 1;">Apply & Save</button>
+            <button type="button" class="action-btn" id="btnValidate" onclick="triggerKeyValidation()" style="flex: 1; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.08); color: #e4e4e7;">Validate Keys</button>
+          </div>
+          
+          <!-- Key Verification Panel -->
+          <div id="keyValidationPanel" style="margin-top: 16px; display: none; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 14px; font-family: var(--font-mono); font-size: 11px;">
+            <div style="font-weight: bold; color: var(--text-muted); margin-bottom: 8px; font-size: 10px; text-transform: uppercase;">Key Verification Results</div>
+            <div id="valResultUpstream" style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.04); padding-bottom: 8px;">
+              <span style="color: #a1a1aa;">Upstream:</span>
+              <span class="val-status">PENDING</span>
+            </div>
+            <div id="valResultWebshareList" style="display: flex; flex-direction: column; gap: 6px;">
+              <!-- Webshare results list -->
+            </div>
+          </div>
         </form>
       </div>
 
       <!-- Live Logs -->
       <div class="card-30">
-        <div class="card-title">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-          Telemetry trace
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+          <div class="card-title" style="margin-bottom: 0;">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+            Telemetry Trace
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <label style="font-size: 10px; font-family: var(--font-mono); color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 4px; user-select: none;">
+              <input type="checkbox" id="logAutoscroll" checked style="accent-color: #60a5fa; cursor: pointer;">
+              Auto-scroll
+            </label>
+            <button onclick="clearLogs()" style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 3px 8px; font-size: 10px; font-family: var(--font-mono); color: #e4e4e7; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.background='rgba(255,255,255,0.04)'">Clear</button>
+          </div>
         </div>
         <div class="terminal-wrapper" id="terminalLogs">
           <div class="log-entry"><span class="log-time">[System]</span>Listening for telemetry...</div>
@@ -1173,6 +1210,9 @@ async function loadSettings() {
 
 async function saveSettings(e) {
   e.preventDefault();
+  const btn = document.getElementById('btnApply');
+  if (btn) btn.innerText = 'Saving...';
+  
   const payload = {
     upstream_base_url: document.getElementById('cfgUpstreamUrl').value,
     upstream_api_key: document.getElementById('cfgUpstreamKey').value,
@@ -1190,17 +1230,110 @@ async function saveSettings(e) {
       body: JSON.stringify(payload)
     });
     if (r.ok) {
-      showToast("Settings saved successfully");
+      showToast("Settings saved successfully! Resetting proxy scraper...", "success");
+      // Run key validation to update health pills and status cards
+      triggerKeyValidation();
     } else {
-      showToast("Error updating settings");
+      showToast("Error updating settings", "danger");
     }
   } catch(e) {
-    showToast("Server request failed");
+    showToast("Server request failed", "danger");
+  } finally {
+    if (btn) btn.innerText = 'Apply & Save';
   }
+}
+
+// Key verification dry-run and health status
+async function triggerKeyValidation() {
+  const btn = document.getElementById('btnValidate');
+  const panel = document.getElementById('keyValidationPanel');
+  const valUpstream = document.getElementById('valResultUpstream');
+  const valWebshare = document.getElementById('valResultWebshareList');
+  
+  if (btn) btn.innerText = 'Validating...';
+  if (panel) panel.style.display = 'block';
+  
+  try {
+    const payload = {
+      upstream_base_url: document.getElementById('cfgUpstreamUrl').value,
+      upstream_api_key: document.getElementById('cfgUpstreamKey').value,
+      webshare_token: document.getElementById('cfgWebshare').value
+    };
+    
+    const r = await fetch('/api/keys/validate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    
+    const d = await r.json();
+    
+    // Upstream URL & Key
+    if (d.upstream) {
+      const up = d.upstream;
+      valUpstream.innerHTML = `
+        <span style="color: #a1a1aa;">Upstream:</span>
+        <span class="val-status" style="color: ${up.valid ? '#4ade80' : '#f87171'}; font-weight: bold;">
+          ${up.valid ? `✓ VALID (${up.models_count} models)` : `✗ FAILED (${up.error})`}
+        </span>
+      `;
+    }
+    
+    // Webshare Keys
+    if (d.webshare && Array.isArray(d.webshare)) {
+      if (d.webshare.length === 0) {
+        valWebshare.innerHTML = '<div style="color: var(--text-muted); font-size: 10px;">No Webshare accounts configured.</div>';
+      } else {
+        valWebshare.innerHTML = d.webshare.map((w, idx) => `
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 4px 0; border-top: 1px solid rgba(255,255,255,0.04);">
+            <span style="color: #a1a1aa;">Webshare Key #${idx+1} (${w.token}):</span>
+            <span style="color: ${w.valid ? '#4ade80' : '#f87171'}; font-weight: bold;">
+              ${w.valid ? `✓ VALID (${w.proxies} proxies)` : `✗ INVALID (${w.error})`}
+            </span>
+          </div>
+        `).join('');
+      }
+    }
+  } catch(e) {
+    showToast("Key validation failed: " + e.message, "danger");
+  } finally {
+    if (btn) btn.innerText = 'Validate Keys';
+  }
+}
+
+// Clear trace logs
+function clearLogs() {
+  const terminal = document.getElementById('terminalLogs');
+  if (terminal) {
+    terminal.innerHTML = '<div class="log-entry"><span class="log-time">[System]</span>Trace log cleared.</div>';
+  }
+  lastLogCount = 0;
+}
+
+// Log badge formatting
+function formatLogLine(line) {
+  let color = '#e4e4e7';
+  if (line.includes('Scraper:')) color = '#60a5fa'; // Blue
+  else if (line.includes('Prober: +Lane')) color = '#34d399'; // Emerald
+  else if (line.includes('Prober:')) color = '#a78bfa'; // Purple
+  else if (line.includes('Settings:')) color = '#facc15'; // Amber
+  else if (line.includes('churn:') || line.includes('sources:')) color = '#38bdf8'; // Sky Blue
+  else if (line.includes('burned') || line.includes('error') || line.includes('fail')) color = '#f87171'; // Red
+
+  const parts = line.split(' - ');
+  let timeStr = new Date().toLocaleTimeString();
+  let msg = line;
+  if (parts.length >= 2) {
+    timeStr = parts[0].split(',')[0]; // strip millisecond details
+    msg = parts.slice(1).join(' - ');
+  }
+  return `<div class="log-entry"><span class="log-time">[${timeStr}]</span><span style="color: ${color};">${msg}</span></div>`;
 }
 
 // Dynamic telemetry UI updates
 let laneLogCount = 0;
+let lastLogCount = 0;
+
 function updateTelemetry(data) {
   // Counters
   document.getElementById('cWarm').innerText = data.pool.warm;
@@ -1218,6 +1351,23 @@ function updateTelemetry(data) {
   } else {
     pill.className = 'status-dot loading';
     txt.innerText = 'discovering routes...';
+  }
+
+  // Engine Live Banner Details
+  document.getElementById('engineQueue').innerText = data.pool.queue;
+  document.getElementById('engineTested').innerText = data.stats.candidates_tested;
+  document.getElementById('engineWarm').innerText = data.pool.warm;
+
+  const engineState = document.getElementById('engineState');
+  if (data.pool.queue > 0) {
+    engineState.innerText = `PROBING (${data.pool.queue} QUEUED)`;
+    engineState.style.color = '#facc15'; // Amber
+  } else if (data.pool.warm >= 25) {
+    engineState.innerText = 'IDLE (POOL WARM)';
+    engineState.style.color = '#4ade80'; // Green
+  } else {
+    engineState.innerText = 'SCRAPING FEEDS';
+    engineState.style.color = '#60a5fa'; // Blue
   }
 }
 
@@ -1286,46 +1436,35 @@ async function refreshPool() {
   } catch(e) {}
 }
 
-// Read and stream logs into the trace container
+// Read and stream real server logs into the trace container
 async function pollLogs() {
   try {
-    const r = await fetch('/api/stats');
-    const d = await r.json();
-    updateTelemetry(d);
+    const [rLogs, rStats] = await Promise.all([
+      fetch('/api/logs'),
+      fetch('/api/stats')
+    ]);
     
-    // Add fake operational messages trace in case local server logs are clean
-    const terminal = document.getElementById('terminalLogs');
-    const now = new Date().toLocaleTimeString();
-    
-    if (laneLogCount === 0) {
-      terminal.innerHTML = '';
+    if (rStats.ok) {
+      const stats = await rStats.json();
+      updateTelemetry(stats);
     }
     
-    let logMsg = '';
-    if (dataCache.warm !== d.pool.warm) {
-      logMsg = `[Pool] Warm lanes synced to ${d.pool.warm}`;
-    } else if (dataCache.requests !== d.stats.requests) {
-      logMsg = `[Relay] Routed request to upstream — status: 200`;
-    } else if (dataCache.failovers !== d.stats.failovers) {
-      logMsg = `[Engine] Route rate-limited: triggered transparent failover`;
+    if (rLogs.ok) {
+      const d = await rLogs.json();
+      const terminal = document.getElementById('terminalLogs');
+      const autoscroll = document.getElementById('logAutoscroll') ? document.getElementById('logAutoscroll').checked : true;
+      
+      if (d.lines && d.lines.length > 0) {
+        terminal.innerHTML = d.lines.map(line => formatLogLine(line)).join('');
+        if (autoscroll) {
+          terminal.scrollTop = terminal.scrollHeight;
+        }
+      } else if (!terminal.innerHTML.trim()) {
+        terminal.innerHTML = '<div class="log-entry"><span class="log-time">[System]</span>Listening for live engine telemetry...</div>';
+      }
     }
-    
-    if (logMsg) {
-      const entry = document.createElement('div');
-      entry.className = 'log-entry';
-      entry.innerHTML = `<span class="log-time">[${now}]</span>${logMsg}`;
-      terminal.appendChild(entry);
-      terminal.scrollTop = terminal.scrollHeight;
-      laneLogCount++;
-    }
-    
-    dataCache.warm = d.pool.warm;
-    dataCache.requests = d.stats.requests;
-    dataCache.failovers = d.stats.failovers;
   } catch(e) {}
 }
-
-const dataCache = { warm: 0, requests: 0, failovers: 0 };
 
 // ── Live Network Graph Visualizer ──────────────────
 const netCanvas = document.getElementById('networkCanvas');

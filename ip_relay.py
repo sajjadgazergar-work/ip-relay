@@ -157,6 +157,51 @@ def mask_key(k: str) -> str:
     return k[:6] + "..." if k else "(none)"
 
 
+async def validate_webshare_token(token: str) -> dict:
+    """Validate a single Webshare API token directly against Webshare API."""
+    tok = token.strip()
+    if not tok or "..." in tok or tok == "(none)":
+        return {"token": mask_key(tok), "valid": False, "proxies": 0, "error": "Empty or masked token"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=4)) as client:
+            r = await client.get(
+                "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=1",
+                headers={"Authorization": f"Token {tok}"}
+            )
+            if r.status_code == 200:
+                count = r.json().get("count", 0)
+                return {"token": mask_key(tok), "valid": True, "proxies": count, "error": None}
+            elif r.status_code == 401:
+                return {"token": mask_key(tok), "valid": False, "proxies": 0, "error": "Invalid token (401 Unauthorized)"}
+            else:
+                return {"token": mask_key(tok), "valid": False, "proxies": 0, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        return {"token": mask_key(tok), "valid": False, "proxies": 0, "error": str(e)}
+
+
+async def validate_upstream(base_url: str, api_key: str) -> dict:
+    """Validate the upstream OpenAI-compatible base URL and API key."""
+    url = base_url.rstrip("/")
+    if not url:
+        return {"valid": False, "error": "Base URL missing"}
+    try:
+        headers = {}
+        if api_key and api_key != "(none)" and "..." not in api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=4), verify=False) as client:
+            r = await client.get(f"{url}/models", headers=headers)
+            if r.status_code == 200:
+                try:
+                    models = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
+                    return {"valid": True, "models_count": len(models), "error": None}
+                except Exception:
+                    return {"valid": True, "models_count": 0, "error": None}
+            else:
+                return {"valid": False, "error": f"HTTP {r.status_code} from /models"}
+    except Exception as e:
+        return {"valid": False, "error": str(e)}
+
+
 def public_settings() -> dict:
     s = dict(settings)
     if s.get("upstream_api_key"):
@@ -329,6 +374,7 @@ async def _fetch_sources() -> None:
     if now - POOL.last_fetch < 30:
         return
     POOL.last_fetch = now
+    log.info("Scraper: Scanning 20+ proxy lists & Webshare API accounts...")
     added = 0
     ok = 0
     async with httpx.AsyncClient(timeout=25, headers=UA, follow_redirects=True) as c:
@@ -473,6 +519,7 @@ async def _probe_candidate(key: str) -> Lane | None:
                     return ln
                 ln = Lane(addr, proto)
                 ln.mark_ok(lat)
+                log.info("Prober: +Lane %s passed completion test (%dms)", addr, int(lat))
                 STATS["probes_ok"] += 1
                 return ln
             if r.status_code == 429 and is_quota_429(r.content, 429):
@@ -495,6 +542,7 @@ async def _churn_batch() -> None:
     for k in batch:
         POOL.candidates.pop(k, None)
     STATS["candidates_tested"] += len(batch)
+    log.info("Prober: Testing %d candidate proxies (concurrency=%d)...", len(batch), TEST_CONCURRENCY)
     sem = asyncio.Semaphore(TEST_CONCURRENCY)
 
     async def guarded(k):
@@ -1048,6 +1096,7 @@ async def post_settings(request: Request):
         return JSONResponse({"error": "invalid json"}, status_code=400)
     
     updates = {}
+    webshare_changed = False
     for k, v in body.items():
         if k in DEFAULTS:
             # If the input looks masked (contains '...' or is '(none)'),
@@ -1055,9 +1104,69 @@ async def post_settings(request: Request):
             if k in ("upstream_api_key", "relay_api_key", "webshare_token") and isinstance(v, str):
                 if "..." in v or v == "(none)":
                     continue
+            if k == "webshare_token" and v != settings.get("webshare_token"):
+                webshare_changed = True
             updates[k] = v
             
-    return apply_settings(updates)
+    res = apply_settings(updates)
+    
+    if webshare_changed:
+        log.info("Settings: Webshare tokens updated — resetting scraper interval to force immediate proxy check.")
+        POOL.last_fetch = 0.0
+        # Immediately kick off scraping & batch churning in the background
+        asyncio.create_task(_fetch_sources())
+        
+    return res
+
+
+@app.post("/api/keys/validate")
+async def api_validate_keys(request: Request):
+    if not _check_relay_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    
+    # 1. Validate Webshare Tokens
+    webshare_tokens = body.get("webshare_token", "").strip()
+    import re
+    orig_token = str(settings.get("webshare_token", ""))
+    orig_tokens = [o.strip() for o in re.split(r"[\s,;\n\r]+", orig_token) if o.strip()]
+    
+    if not webshare_tokens:
+        tokens = list(orig_tokens)
+    else:
+        tokens = [t.strip() for t in re.split(r"[\s,;\n\r]+", webshare_tokens) if t.strip()]
+        
+    resolved_tokens = []
+    for t in tokens:
+        if "..." in t or t == "(none)":
+            matched = False
+            for o in orig_tokens:
+                if o.startswith(t.split("...")[0]):
+                    resolved_tokens.append(o)
+                    matched = True
+                    break
+            if not matched and orig_tokens:
+                resolved_tokens.append(orig_tokens[0])
+        else:
+            resolved_tokens.append(t)
+            
+    webshare_results = await asyncio.gather(*[validate_webshare_token(tok) for tok in resolved_tokens])
+    
+    # 2. Validate Upstream URL & Key
+    upstream_url = body.get("upstream_base_url", "").strip() or UPSTREAM_BASE_URL
+    upstream_key = body.get("upstream_api_key", "").strip()
+    if not upstream_key or "..." in upstream_key or upstream_key == "(none)":
+        upstream_key = str(settings.get("upstream_api_key", ""))
+        
+    upstream_result = await validate_upstream(upstream_url, upstream_key)
+    
+    return {
+        "webshare": webshare_results,
+        "upstream": upstream_result
+    }
 
 
 @app.get("/api/logs")
