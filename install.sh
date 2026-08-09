@@ -13,7 +13,9 @@ set -euo pipefail
 APP_DIR="/opt/ip-relay"
 MODE="auto"          # auto | update | docker | manual
 REPO="sajjadgazergar-work/ip-relay"
-TAG="v0.3.0"
+# Track the default branch, not a frozen release tag — a pinned tag is how this
+# shipped stale code before. Always install the latest main.
+BRANCH="main"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

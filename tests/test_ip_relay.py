@@ -378,13 +378,58 @@ def test_anthropic_to_openai_content_blocks():
 
 def test_openai_to_anthropic():
     body = json.dumps({
-        "id": "x", "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+        "id": "x", "choices": [{"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 3, "completion_tokens": 2},
     }).encode()
     d = json.loads(ip_relay.openai_to_anthropic(body, "m"))
     assert d["type"] == "message"
     assert d["content"] == [{"type": "text", "text": "hello"}]
     assert d["usage"] == {"input_tokens": 3, "output_tokens": 2}
+    assert d["stop_reason"] == "end_turn"
+
+
+def test_tool_call_roundtrip():
+    """Anthropic request with tools -> OpenAI; OpenAI tool_calls -> Anthropic."""
+    # request side: tools + tool_choice translated
+    out = ip_relay.anthropic_to_openai({
+        "model": "m", "max_tokens": 10,
+        "messages": [{"role": "user", "content": "weather?"}],
+        "tools": [{"name": "get_weather", "description": "w",
+                   "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}],
+        "tool_choice": {"type": "auto"},
+    })
+    assert out["tools"][0]["function"]["name"] == "get_weather"
+    assert out["tools"][0]["function"]["parameters"]["properties"]["city"]["type"] == "string"
+    assert out["tool_choice"] == "auto"
+
+    # response side: tool_calls -> tool_use blocks
+    body = json.dumps({
+        "id": "x",
+        "choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "call_1", "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'}}],
+        }}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }).encode()
+    d = json.loads(ip_relay.openai_to_anthropic(body, "m"))
+    assert d["stop_reason"] == "tool_use"
+    assert d["content"][0]["type"] == "tool_use"
+    assert d["content"][0]["name"] == "get_weather"
+    assert d["content"][0]["input"] == {"city": "Paris"}
+
+    # history side: tool_use + tool_result blocks -> assistant tool_calls + tool msg
+    out2 = ip_relay.anthropic_to_openai({
+        "model": "m",
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "Paris"}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "sunny"}]},
+        ],
+    })
+    assert out2["messages"][0]["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert out2["messages"][1] == {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
 
 
 def test_openai_sse_to_anthropic():
@@ -395,9 +440,22 @@ def test_openai_sse_to_anthropic():
     ).encode()
     out = ip_relay.openai_sse_to_anthropic(body, "m").decode()
     assert "message_start" in out
-    assert out.count('"type": "content_block_delta"') == 2
-    assert '"text": "He"' in out
+    # batched into one text block containing both chunks
+    assert '"type": "text_delta", "text": "Hello"' in out
     assert "message_stop" in out
+
+
+def test_openai_sse_to_anthropic_tool_call():
+    body = (
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\\"city\\""}}]}}]}\n'
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\\"Paris\\"}"}}]}}]}\n'
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n'
+        "data: [DONE]\n"
+    ).encode()
+    out = ip_relay.openai_sse_to_anthropic(body, "m").decode()
+    assert '"type": "tool_use", "id": "call_1", "name": "get_weather"' in out
+    assert '"type": "input_json_delta", "partial_json": "{\\"city\\":\\"Paris\\"}"' in out
+    assert '"stop_reason": "tool_use"' in out
 
 
 def test_anthropic_messages_endpoint(monkeypatch):
