@@ -166,6 +166,11 @@ All settings can be configured via environment variables or directly edited live
 | `ALLOW_SOCKS` | `true` | Enable SOCKS4 and SOCKS5 proxy scraping sources |
 | `PORT` | `8080` | HTTP server port |
 
+> 💡 **Troubleshooting Residential Networks (e.g. in Iran)**:
+> If you are running `ip-relay` on a home network, high test concurrency can saturate your router's NAT tables, causing connection timeouts, packet loss, or `503 Too many open connections` errors.
+> - **Decrease Concurrency**: Change `PROXY_TEST_CONCURRENCY` to `15` or `25` in your settings or `.env` to prevent overloading your home router.
+> - **Censorship Resilience**: The prober automatically checks connection directly against your upstream's `/models` endpoint and falls back to Cloudflare/Firefox, avoiding issues with censored test targets (like Google) on local residential connections.
+
 ---
 
 ## 🏗️ Architecture & Egress Resilience Engine (v0.6+)

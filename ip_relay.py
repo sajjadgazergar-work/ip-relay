@@ -497,15 +497,29 @@ async def _fetch_sources() -> None:
 # Cheap screen first (TCP connect via the proxy to a tiny http endpoint, no
 # upstream quota spent), then a real 1-token upstream probe to confirm the IP
 # isn't already quota-burned.
-_SCREEN_URL = "http://clients3.google.com/generate_204"
-
-
 async def _screen(c: httpx.AsyncClient) -> bool:
+    # 1. Try Upstream Models Endpoint
     try:
-        r = await c.get(_SCREEN_URL, timeout=8)
-        return r.status_code in (200, 204)
+        r = await c.get(f"{UPSTREAM_BASE_URL}/models", headers={"Authorization": f"Bearer {UPSTREAM_API_KEY}"}, timeout=4)
+        if r.status_code in (200, 401, 403, 404, 405):
+            return True
     except Exception:
-        return False
+        pass
+    # 2. Fallback: Try Cloudflare 204
+    try:
+        r = await c.get("http://cp.cloudflare.com/generate_204", timeout=4)
+        if r.status_code in (200, 204):
+            return True
+    except Exception:
+        pass
+    # 3. Fallback: Try Firefox portal success text
+    try:
+        r = await c.get("http://detectportal.firefox.com/success.txt", timeout=4)
+        if r.status_code in (200, 204) or b"success" in r.content:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 async def _probe_candidate(key: str) -> Lane | None:
@@ -514,11 +528,7 @@ async def _probe_candidate(key: str) -> Lane | None:
     try:
         # Stage 1: Fast connectivity screening (max 4 seconds)
         async with httpx.AsyncClient(proxy=proxy_url, timeout=4, verify=False) as c:
-            try:
-                r_screen = await c.get(_SCREEN_URL)
-                if r_screen.status_code not in (200, 204):
-                    return None
-            except Exception:
+            if not await _screen(c):
                 return None
 
         # Stage 2: Full upstream completions check
@@ -583,19 +593,20 @@ async def _churn_batch() -> None:
 
     async def guarded(k):
         async with sem:
-            return await _probe_candidate(k)
+            try:
+                res = await _probe_candidate(k)
+                if isinstance(res, Lane):
+                    POOL.lanes[res.addr] = res
+                    if res.warm:
+                        log.info("churn: promoted new warm lane: %s (score=%.2f, lat=%dms)", res.addr, res.score, int(res.lat_ms))
+                else:
+                    POOL.tried[k] = time.time()
+            except Exception:
+                POOL.tried[k] = time.time()
 
-    results = await asyncio.gather(*[guarded(k) for k in batch], return_exceptions=True)
-    new = 0
-    for k, res in zip(batch, results):
-        if isinstance(res, Lane):
-            POOL.lanes[res.addr] = res
-            new += 1
-        else:
-            POOL.tried[k] = time.time()
-    if new:
-        log.info("churn: tested %d -> +%d lanes (warm=%d parked=%d queue=%d)",
-                 len(batch), new, len(POOL.warm_lanes()), len(POOL.parked_lanes()), len(POOL.candidates))
+    await asyncio.gather(*[guarded(k) for k in batch], return_exceptions=True)
+    log.info("churn: batch completed. Pool stats: warm=%d, parked=%d, queue=%d",
+             len(POOL.warm_lanes()), len(POOL.parked_lanes()), len(POOL.candidates) + len(POOL.priority_candidates))
 
 
 async def _recover_parked() -> None:
@@ -739,7 +750,11 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
     for _ in range(attempts):
         lanes = [ln for ln in POOL.warm_lanes() if ln.addr not in tried_addrs]
         if not lanes:
-            break
+            # Fallback to parked lanes if no warm lanes are available
+            lanes = [ln for ln in POOL.parked_lanes() if ln.addr not in tried_addrs]
+            lanes.sort(key=lambda ln: ln.parked_until)
+            if not lanes:
+                break
         lane = lanes[0]
         tried_addrs.add(lane.addr)
         try:
