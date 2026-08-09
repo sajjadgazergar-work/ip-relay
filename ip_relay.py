@@ -1,10 +1,11 @@
 # ip-relay — per-IP quota API relay with automatic egress rotation
 #
 # Sits between a gateway (9router, OpenRouter-style aggregators, your own
-# client) and an upstream OpenAI-compatible API whose free tier is limited
-# PER IP ADDRESS (e.g. opencode.ai/zen/v1). Each unique egress IP carries
-# its own quota, so this relay rotates through a proxy pool and lets one
-# base URL serve more free-model traffic than a single IP would allow.
+# client) and ANY upstream OpenAI-compatible API whose free tier is limited
+# PER IP ADDRESS (e.g. opencode.ai/zen/v1, Groq, SambaNova, Together, DeepSeek,
+# or a custom endpoint). Each unique egress IP carries its own quota, so this
+# relay rotates through a proxy pool and lets one base URL serve more
+# free-model traffic than a single IP would allow.
 # Your server's own IP never touches the upstream.
 #
 # ── design notes (v0.6, the resilience rewrite) ─────────────────────────
@@ -581,20 +582,26 @@ async def pool_manager() -> None:
 # ── relay core ────────────────────────────────────────────────────
 
 def is_quota_429(body: bytes, status: int) -> bool:
+    """True when the response signals rate-limiting / quota exhaustion.
+
+    Provider-agnostic: any HTTP 429 counts, plus generic rate-limit markers
+    found in the response body (works for opencode, Groq, SambaNova, Together,
+    DeepSeek, and any OpenAI-compatible gateway)."""
     if status != 429:
         return False
+    if not body:
+        return True
     try:
         data = json.loads(body)
         err = data.get("error", {})
         msg = str(err.get("message", ""))
-        return (
-            err.get("type") == "FreeUsageLimitError"
-            or "Rate limit" in msg
-            or "quota" in msg.lower()
-            or "usage limit" in msg.lower()
-        )
+        err_type = str(err.get("type", ""))
+        markers = ("rate limit", "quota", "usage limit", "exhausted", "too many requests",
+                   "429", "limit reached", "ratelimit", "rate_limit")
+        return any(m in msg.lower() for m in markers) or any(m in err_type.lower() for m in markers)
     except Exception:
-        return False
+        # Unparseable body on a 429 is still a rate-limit signal
+        return True
 
 
 async def _attempt(lane: Lane, payload: dict, path: str, headers: dict, timeout: float):
@@ -739,9 +746,9 @@ async def fallback_model() -> str:
         status, _, body = await get_models_cached()
         if status == 200:
             ids = [m.get("id", "") for m in json.loads(body).get("data", [])]
-            free = [i for i in ids if i.endswith("-free")]
-            if free:
-                chosen = next((i for i in free if "deepseek" in i), free[0])
+            if ids:
+                # Prefer a free/flash/lightweight model if one exists, else the first
+                chosen = next((i for i in ids if "-free" in i or "flash" in i or "mini" in i), ids[0])
     except Exception:
         pass
     _FALLBACK_MODEL = chosen
@@ -759,24 +766,21 @@ def strip_model_prefix(model: str) -> str:
 async def resolve_model(model: str) -> str:
     """Map a client-requested model to one the configured upstream key can serve.
 
-    With the free-tier "public" key only -free models work; anything else
-    (claude-*, gpt-*, etc.) resolves to the fallback free model instead of
-    passing through and failing with "Missing API key" upstream."""
+    Provider-agnostic: if the requested model exists upstream, pass it through.
+    If it doesn't (wrong tier, alias, or a provider that serves different ids),
+    resolve to the configured PROBE_MODEL or a sensible free model from the
+    upstream /models list. This makes the relay work with any OpenAI-compatible
+    provider — not just opencode's free tier."""
     name = strip_model_prefix(model)
-    try:
-        status, _, body = await get_models_cached()
-        if status == 200:
-            ids = {m.get("id", "") for m in json.loads(body).get("data", [])}
-            # free tier: only -free models are usable
-            if UPSTREAM_API_KEY == "public":
-                if name in ids and name.endswith("-free"):
+    if name:
+        try:
+            status, _, body = await get_models_cached()
+            if status == 200:
+                ids = {m.get("id", "") for m in json.loads(body).get("data", [])}
+                if name in ids:
                     return name
-                return await fallback_model()
-            # real key: pass through known models
-            if name in ids:
-                return name
-    except Exception:
-        pass
+        except Exception:
+            pass
     return await fallback_model()
 
 
@@ -1046,10 +1050,10 @@ async def post_settings(request: Request):
     updates = {}
     for k, v in body.items():
         if k in DEFAULTS:
-            # If the input looks masked (ends with '...' or is '(none)'),
+            # If the input looks masked (contains '...' or is '(none)'),
             # ignore it so we don't overwrite the actual key on disk.
             if k in ("upstream_api_key", "relay_api_key", "webshare_token") and isinstance(v, str):
-                if v.endswith("...") or v == "(none)":
+                if "..." in v or v == "(none)":
                     continue
             updates[k] = v
             

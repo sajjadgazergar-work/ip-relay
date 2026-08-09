@@ -851,6 +851,23 @@ tr:hover td {
         
         <form id="settingsForm" onsubmit="saveSettings(event)">
           <!-- Drag Slider: Target Pool Size -->
+          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 10px;">Upstream provider</div>
+          
+          <div class="input-container" style="margin-bottom: 12px;">
+            <label class="input-label" for="cfgUpstreamUrl">Base URL</label>
+            <input type="url" class="input-element" id="cfgUpstreamUrl" placeholder="https://opencode.ai/zen/v1" style="font-family: var(--font-mono); font-size: 11px;">
+          </div>
+          
+          <div class="input-container" style="margin-bottom: 12px;">
+            <label class="input-label" for="cfgUpstreamKey">Upstream API Key</label>
+            <input type="password" class="input-element" id="cfgUpstreamKey" placeholder="public">
+          </div>
+          
+          <div class="input-container" style="margin-bottom: 20px;">
+            <label class="input-label" for="cfgProbeModel">Probe Model</label>
+            <input type="text" class="input-element" id="cfgProbeModel" placeholder="deepseek-v4-flash-free" style="font-family: var(--font-mono); font-size: 11px;">
+          </div>
+          
           <div class="slider-group">
             <div class="slider-header">
               <span class="slider-label">Target Pool Size</span>
@@ -1126,6 +1143,13 @@ async function loadSettings() {
     if (!settingsHydrated) {
       settingsHydrated = true;
       
+      // Upstream provider fields
+      document.getElementById('cfgUpstreamUrl').value = d.settings.upstream_base_url || '';
+      const upKey = d.settings.upstream_api_key || '';
+      document.getElementById('cfgUpstreamKey').value =
+        (upKey.includes('...') || upKey === '(none)') ? '' : upKey;
+      document.getElementById('cfgProbeModel').value = d.settings.probe_model || '';
+      
       // Sliders
       document.getElementById('cfgPoolTarget').value = d.settings.proxy_pool_target;
       updateSlider('PoolTarget');
@@ -1150,6 +1174,9 @@ async function loadSettings() {
 async function saveSettings(e) {
   e.preventDefault();
   const payload = {
+    upstream_base_url: document.getElementById('cfgUpstreamUrl').value,
+    upstream_api_key: document.getElementById('cfgUpstreamKey').value,
+    probe_model: document.getElementById('cfgProbeModel').value,
     proxy_pool_target: parseInt(document.getElementById('cfgPoolTarget').value),
     proxy_test_concurrency: parseInt(document.getElementById('cfgConcurrency').value),
     webshare_token: document.getElementById('cfgWebshare').value,

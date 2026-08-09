@@ -1,206 +1,220 @@
-# ip-relay
+# ip-relay // Egress Proxy Rotator
 
-**Turn one free API key into a whole pool of free API keys — automatically.**
+**Turn any per-IP rate-limited OpenAI-compatible endpoint into a high-concurrency rotating proxy pool.**
 
-[🇮🇷 راهنمای فارسی](README.fa.md) · [Benchmark — does it work?](BENCHMARK.md) · [Dashboard screenshot](https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/docs/dashboard.png)
+[🇮🇷 راهنمای فارسی (Persian)](README.fa.md) · [Benchmark](BENCHMARK.md) · [Dashboard Screenshot](https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/docs/dashboard.png)
 
-ip-relay sits between your AI apps and an API provider whose free tier is limited **per IP address**. Instead of hitting the limit after a few dozen requests, ip-relay routes each request through a rotating pool of proxies — so every request can come from a fresh IP, with its own fresh quota.
+---
 
-![Dashboard](https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/docs/dashboard.png)
+`ip-relay` sits between your AI applications and any OpenAI-compatible API provider whose free tier or rate limits are enforced **per IP address**.
 
-> ⚠️ **Please read this first**: this tool works around rate limits that providers set per IP. Check the upstream provider's terms of service before using it, and don't be a jerk with it. The maintainers are not responsible for how you use it.
+Instead of getting blocked by `429 Too Many Requests` after exhausting your single server IP quota, `ip-relay` dynamically routes requests through a continuous pool of rotating proxy lanes (HTTP/S, SOCKS4/5, Webshare). Each request egresses through a fresh IP carrying its own independent quota.
 
-## What problem does this solve?
+![Dashboard Screenshot](https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/docs/dashboard.png)
 
-| Without ip-relay | With ip-relay |
-|---|---|
-| Your app hits `deepseek-v4-flash-free` from one IP | Your app hits it from **42 different IPs** |
-| After ~N requests/day: **429 — quota exhausted** | Each IP carries its own quota |
-| You wait 24h for the limit to reset | Rotation happens automatically on quota errors |
+> ⚠️ **Notice**: This tool is designed to route requests across independent egress IPs to prevent single-IP rate-limit exhaustion. Always verify and comply with your upstream provider's terms of service.
 
-## Features
+---
 
-- ✅ **Zero-config default**: works out of the box against opencode's free tier (just run it)
-- ✅ **Rotates egress IPs automatically** when the quota error appears
-- ✅ **OpenAI-compatible**: drop-in for any OpenAI client, gateway, or aggregator
-- ✅ **Anthropic-compatible**: `/v1/messages` endpoint for Claude Code & Anthropic SDKs (auto-translated)
-- ✅ **Streaming**: full SSE pass-through for chat completions
-- ✅ **Web dashboard**: status, live stats, live logs, and settings — no tech knowledge needed
-- ✅ **Settings persist** across restarts (via `settings.json` / the dashboard)
-- ✅ **Docker + systemd**: one-command deploy on any server
+## ⚡ What Problem Does This Solve?
 
-## Quickstart (non-technical)
+| Scenario | Without ip-relay | With ip-relay |
+|---|---|---|
+| **Egress IP** | All requests originate from your 1 server IP | Requests rotate across **40+ active proxy IPs** |
+| **Rate Limit** | Hits `429 Rate Limit Exceeded` after N requests | Each proxy lane maintains its own isolated quota |
+| **Downtime** | Must wait 24h for single-IP quota resets | **Transparent failover**: failed IPs auto-bypass instantly |
+| **Compatibility** | Locked to 1 provider API format | Speaks **OpenAI API** & **Anthropic (`/v1/messages`)** |
 
-### One command — install & update
+---
+
+## ✨ Features
+
+- **🌐 Provider Agnostic**: Works out of the box with `opencode.ai/zen/v1`, Groq, SambaNova, Together, DeepSeek, or any custom OpenAI-compatible endpoint.
+- **🔄 Transparent Mid-Request Failover**: If a proxy lane dies or gets rate-limited mid-request, `ip-relay` silently retries on the next-best lane without failing your client call.
+- **⚡ EWMA Scored Lanes & Latency Ranking**: Tracks lane health, latency, and success rates. Fast, healthy proxies automatically win request routing.
+- **🔑 Webshare Multi-Account Integration**: Paste multiple Webshare API tokens (one per line, comma, or semicolon) via the dashboard to combine multiple free or paid proxy accounts into one pool.
+- **🤖 Anthropic & Claude Code Protocol Gateway**: Native `/v1/messages` endpoint with full tool-calling, system prompts, and SSE streaming translation.
+- **📊 Spatial 3D Network Telemetry Dashboard**: High-polish dark glassmorphism dashboard with an interactive 3D spatial node visualizer, live status table, logs, and settings editor.
+- **🛡️ Secure Credential Protection**: Raw API keys stay encrypted locally in `settings.json` (git-ignored) and return masked in UI payloads.
+- **🚀 One-Command Deployment**: Instant setup for Linux/macOS (`bash`), Windows (`PowerShell`), Docker, or systemd.
+
+---
+
+## 📦 Quickstart
+
+### 1. Linux & macOS (One-Command Install & Update)
 
 ```bash
 curl -sL https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.sh | bash
 ```
 
-> Always installs the **latest** code from `main` (no frozen release tag). Re-running the same command updates an existing install in place.
+> **Note**: Re-running the installer command automatically updates an existing installation to the latest version on `main` without overwriting your `.env` or `settings.json` configuration.
 
-That's it. The script:
-- Installs into `/opt/ip-relay` (fresh) **or** updates an existing install automatically
-- Creates a Python venv, installs deps, sets up a systemd service that auto-starts
-- **Never overwrites your config** (`.env`, `settings.json`) — backs up code first
-- Finishes with a health check
-
-**Customize:**
+**Custom Install Options:**
 ```bash
-# install somewhere else
-curl -sL ...install.sh | bash -s -- --dir /home/you/ip-relay
-# run without systemd (manual)
+# Custom directory
+curl -sL ...install.sh | bash -s -- --dir /opt/ip-relay
+
+# Run manually (without systemd)
 curl -sL ...install.sh | bash -s -- --manual
-# run with Docker instead
+
+# Deploy via Docker container
 curl -sL ...install.sh | bash -s -- --docker
 ```
 
-Then open **http://localhost:8080** (or your server IP) — you'll see the dashboard.
+### 2. Windows (PowerShell)
 
-### Windows (PowerShell)
-
-```powershell
-# download the installer (PowerShell — note: `curl` here is Invoke-WebRequest, so use irm):
-irm https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.ps1 -OutFile install.ps1
-
-# run it (no admin needed):
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-Or all-in-one:
+Run in PowerShell (no Administrator privileges required):
 
 ```powershell
 iex (irm https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.ps1)
 ```
 
-> Always pulls the **latest** code from `main`. Re-run the same command to update.
+> **Note**: Avoid using `curl` in PowerShell (PowerShell aliases `curl` to `Invoke-WebRequest` which lacks `-sL`). Use the `irm` command above.
 
-The script installs into `%LOCALAPPDATA%\ip-relay`, creates a venv, installs deps, and leaves you a **`start-ip-relay.bat`** you can double-click to run. Flags: `-Dir D:\ip-relay`, `-Manual` (no launcher), `-Docker`.
-
-> ⚠️ If you pasted the `curl -sL ...` Linux command into PowerShell, that's why it failed — PowerShell aliases `curl` to `Invoke-WebRequest`, which doesn't have `-sL`. Use the `irm` form above.
-
-### Docker — manual
+### 3. Docker (Manual)
 
 ```bash
-docker run -d --name ip-relay -p 8080:8080 -e PORT=8080 ghcr.io/<you>/ip-relay
+docker run -d \
+  --name ip-relay \
+  -p 8080:8080 \
+  -e PORT=8080 \
+  -e UPSTREAM_BASE_URL="https://opencode.ai/zen/v1" \
+  ghcr.io/sajjadgazergar-work/ip-relay:latest
 ```
 
-Then open **http://localhost:8080** in your browser — you'll see the dashboard.
-
-### From source (developers)
+### 4. From Source
 
 ```bash
-git clone https://github.com/sajjadgazergar-work/ip-relay
+git clone https://github.com/sajjadgazergar-work/ip-relay.git
 cd ip-relay
-python -m venv .venv && . .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn ip_relay:app --host 0.0.0.0 --port 8080
 ```
 
-## Using the dashboard
+Access the Web Dashboard at **http://localhost:8080** (or `http://<your-server-ip>:8080`).
 
-The web UI at `/` shows you:
+---
 
-- **Status** — is the relay healthy?
-- **Proxy pool** — how many working egress IPs are ready
-- **Requests / Rotations** — live usage counters
-- **Configuration** — change the upstream URL/key, proxy refresh rate, etc. (no editing files)
-- **Live log** — what the relay is doing right now
+## 🔌 Connecting Your AI Applications
 
-## Connecting your AI app
-
-Point any OpenAI-compatible client at your server:
+Point any OpenAI-compatible client, SDK, or gateway at your relay:
 
 ```
-Base URL: http://<your-server>:8080/v1
-API key:  whatever you set as the relay key (or leave blank)
-Model:    deepseek-v4-flash-free   (no prefix — see note below)
+Base URL:  http://<server-ip>:8080/v1
+API Key:   (Your RELAY_API_KEY, or leave blank if unset)
+Model:     deepseek-v4-flash-free (or any model hosted by your upstream)
 ```
 
-> **⚠️ Prefix confusion (important):**
-> - **Directly to the relay** — use the **bare model name** (`deepseek-v4-flash-free`, `claude-fable-5`, ...). The relay strips any prefix, so `whatever/deepseek-v4-flash-free` also works.
-> - **Through 9router** (or another aggregator) — the model gets the **provider prefix you configured** in the aggregator, e.g. `ocr/deepseek-v4-flash-free`. That prefix lives in 9router's config, **not** in the relay.
-> - **Claude Code** — set `ANTHROPIC_BASE_URL=http://<server>:8080/v1` and `ANTHROPIC_AUTH_TOKEN=public`, and the model id is the bare name.
-
-Example with curl:
-
+### Example: curl (OpenAI Format)
 ```bash
 curl http://localhost:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer public' \
-  -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}'
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer public" \
+  -d '{
+    "model": "deepseek-v4-flash-free",
+    "messages": [{"role": "user", "content": "Hello world!"}]
+  }'
 ```
 
-Works with:
-- **OpenAI SDKs** (Python, Node, etc.) — just change `base_url`
-- **9router / OpenRouter-style aggregators** — add it as a provider
-- **Anything that speaks the OpenAI API**
+### Example: Claude Code CLI
+```bash
+export ANTHROPIC_BASE_URL="http://localhost:8080/v1"
+export ANTHROPIC_AUTH_TOKEN="public"
+claude
+```
 
-## Configuration
+### Example: Python OpenAI SDK
+```python
+from openai import OpenAI
 
-All settings are editable from the dashboard, or via environment variables:
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="public"
+)
 
-| Variable | Default | Description |
+response = client.chat.completions.create(
+    model="deepseek-v4-flash-free",
+    messages=[{"role": "user", "content": "Explain relativity briefly."}]
+)
+print(response.choices[0].message.content)
+```
+
+---
+
+## ⚙️ Configuration Reference
+
+All settings can be configured via environment variables or directly edited live through the **Web Dashboard** (`settings.json` overlays automatically):
+
+| Environment Variable | Default Value | Description |
 |---|---|---|
-| `UPSTREAM_BASE_URL` | `https://opencode.ai/zen/v1` | Upstream OpenAI-compatible API |
-| `UPSTREAM_API_KEY` | `public` | Key sent upstream (opencode free tier uses `public`) |
-| `RELAY_API_KEY` | *(empty)* | Optional — protect your relay & dashboard with a key |
-| `PROXY_REFRESH_SEC` | `600` | How often to re-pull the public proxy lists (seconds) |
-| `PROXY_TEST_CONCURRENCY` | `25` | Proxies tested in parallel |
-| `PROXY_MAX_CANDIDATES` | `2000` | Max untested candidates held in the reservoir |
-| `PROXY_POOL_TARGET` | `25` | Working lanes the churner tries to maintain |
-| `PROBE_TIMEOUT` | `20` | Timeout (s) for the real upstream probe |
-| `DIRECT_LANE` | `1` | Allow direct (your server IP) egress |
-| `PROBE_MODEL` | `deepseek-v4-flash-free` | Model used to test proxies |
-| `ALLOW_SOCKS` | *(off)* | Also fetch protocol:// lists (needs `httpx[socks]`) |
-| `PORT` | `8080` | Listen port |
+| `UPSTREAM_BASE_URL` | `https://opencode.ai/zen/v1` | Upstream OpenAI-compatible API base endpoint URL |
+| `UPSTREAM_API_KEY` | `public` | API Bearer key forwarded to the upstream provider |
+| `RELAY_API_KEY` | *(empty)* | Optional authentication key to protect your relay & dashboard |
+| `PROBE_MODEL` | `deepseek-v4-flash-free` | Model ID used to test candidate proxy lanes |
+| `PROXY_POOL_TARGET` | `30` | Number of healthy warm proxy lanes to maintain |
+| `PROXY_MAX_CANDIDATES` | `3000` | Maximum candidate proxies held in the testing queue |
+| `PROXY_TEST_CONCURRENCY` | `60` | Concurrent proxy testing connections |
+| `PROXY_PROBE_TIMEOUT` | `25` | Timeout (seconds) for 1-token proxy candidate probing |
+| `RELAY_PROXY_TIMEOUT` | `40` | Max duration (seconds) allowed for live proxy request routing |
+| `RELAY_ATTEMPTS` | `6` | Maximum transparent failover retries per request |
+| `LANE_COOLDOWN_SEC` | `90` | Cooldown duration (seconds) before re-testing a rate-limited lane |
+| `LANE_RECOVER_SEC` | `240` | Interval (seconds) for re-probing parked lanes |
+| `WEBSHARE_TOKEN` | *(empty)* | Webshare API tokens (supports multiple line-by-line keys) |
+| `DIRECT_LANE` | `false` | Enable your server's own IP address as an egress lane |
+| `ALLOW_SOCKS` | `true` | Enable SOCKS4 and SOCKS5 proxy scraping sources |
+| `PORT` | `8080` | HTTP server port |
 
-Legacy aliases `OPENCODE_API_KEY` / `OPENCODE_BASE_URL` still work.
+---
 
-## How the pool stays alive (v0.6+)
-
-Free proxies die fast and many public ones are already rate-limited by other
-users. v0.6 introduced a highly resilient multi-tier proxy architecture:
-
-1. **A candidate reservoir** — thousands of SOCKS4/5 and HTTP/S `ip:port` entries pulled from 20+ public lists and custom Webshare API keys.
-2. **A continuous churner** — tests a small batch every few seconds:
-   stage 1 = cheap TCP/HTTP check (6s, no upstream quota cost),
-   stage 2 = real 1-token upstream request through the proxy.
-3. **Scored lanes & latency ranking** — every lane carries an EWMA score and measured latency; requests are automatically routed to the fastest healthy lane.
-4. **Transparent request failover** — when a proxy lane fails mid-request, it is silently bypassed and retried on the next-best lane without the client ever detecting it.
-5. **Webshare key integration** — configure multiple Webshare API tokens via the dashboard UI or `.env` settings to automatically populate high-quality authenticated proxy lanes.
-6. **Auto top-up** — when working lanes drop below `PROXY_POOL_TARGET`, the churner keeps testing until the pool refills. Burned lanes are parked for cooldown, dead ones are removed automatically.
-
-First working lanes usually appear within 2–5 minutes of startup; the pool
-then keeps topping itself up. Watch it live on the dashboard's **Pool status**
-panel.
-
-## How it works
+## 🏗️ Architecture & Egress Resilience Engine (v0.6+)
 
 ```
-your app / gateway
-      │  OpenAI-compatible requests
-      ▼
-  ip-relay ──▶ proxy pool (rotating egress IPs)
-      │            ▲
-      │            └── quota error (429) → mark IP burned, try next
-      ▼
-  upstream API (opencode.ai/zen/v1)
+  [ Your App / Gateway ]
+            │  (OpenAI / Anthropic API Request)
+            ▼
+┌─────────────────────────────────────────────────────────┐
+│                       ip-relay                          │
+│                                                         │
+│   ┌─────────────────────────────────────────────────┐   │
+│   │           Multi-Source Candidate Queue          │   │
+│   │  (SOCKS4/5 + HTTP/S + 20+ Feeds + Webshare)     │   │
+│   └────────────────────────┬────────────────────────┘   │
+│                            │ (Parallel Prober)          │
+│                            ▼                            │
+│   ┌─────────────────────────────────────────────────┐   │
+│   │        EWMA Scored & Latency-Ranked Lanes       │   │
+│   └────────────────────────┬────────────────────────┘   │
+│                            │ (Transparent Failover)     │
+└────────────────────────────┼────────────────────────────┘
+                             │ (Egress via Proxy IP)
+                             ▼
+               [ Upstream API Provider ]
 ```
 
-- The relay **fetches** free HTTP proxies from public lists
-- It **tests** each one with a real 1-token request (proves it works *and* its IP isn't already burned)
-- On a quota error it **parks** the burned IP and tries the next lane — transparently
-- Your server's real IP **never touches the upstream** (unless you enable `DIRECT_LANE`)
+1. **Multi-Source Scraping**: Collects fresh egress candidates continuously across SOCKS4, SOCKS5, HTTP/S public feeds, and Webshare API accounts.
+2. **Two-Stage Validation**: Candidates undergo cheap TCP screening followed by a 1-token upstream completion test.
+3. **EWMA Scoring & Latency Ranking**: Healthy lanes earn high EWMA scores based on response speed and success history; low-latency lanes are prioritized automatically.
+4. **Transparent Failover**: On a 429 quota exhaustion or proxy drop, the relay silently re-routes the active connection to the next-best lane within milliseconds.
 
-## Development
+---
+
+## 🛠️ Development & Testing
 
 ```bash
+# Install development dependencies
 pip install -r requirements-dev.txt
-ruff check .          # lint
-pytest                # tests (17 tests, network-free, mocked upstream)
+
+# Run linter
+ruff check .
+
+# Run unit tests (17 passed, fully mocked)
+pytest
 ```
 
-## License
+---
 
-MIT
+## 📄 License
+
+Distributed under the [MIT License](LICENSE).

@@ -132,10 +132,17 @@ def test_echo_proxy_burned(monkeypatch):
 
 
 def test_is_quota_429():
-    body = json.dumps({"error": {"type": "FreeUsageLimitError", "message": "x"}}).encode()
+    # opencode-style quota body
+    body = json.dumps({"error": {"type": "FreeUsageLimitError", "message": "quota exceeded"}}).encode()
     assert ir.is_quota_429(body, 429)
+    # generic provider 429 (Groq / SambaNova style)
+    generic = json.dumps({"error": {"message": "Rate limit reached for org"}}).encode()
+    assert ir.is_quota_429(generic, 429)
+    # empty body 429 still counts
+    assert ir.is_quota_429(b"", 429)
+    # non-429 status is never a quota signal
     assert not ir.is_quota_429(body, 200)
-    assert not ir.is_quota_429(b"not json", 429)
+    assert not ir.is_quota_429(b"not json", 200)
 
 
 def test_masked_key_preservation():
