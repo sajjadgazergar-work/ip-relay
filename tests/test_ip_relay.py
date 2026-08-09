@@ -138,6 +138,19 @@ def test_is_quota_429():
     assert not ir.is_quota_429(b"not json", 429)
 
 
+def test_masked_key_preservation():
+    ir.apply_settings({"webshare_token": "secret_real_token"}, persist=False)
+    client = TestClient(ir.app)
+    # Post masked string
+    r = client.post("/api/settings", json={"webshare_token": "secret..."})
+    assert r.status_code == 200
+    assert ir.WEBSHARE_TOKEN == "secret_real_token"
+    # Post real new string
+    r2 = client.post("/api/settings", json={"webshare_token": "brand_new_token"})
+    assert r2.status_code == 200
+    assert ir.WEBSHARE_TOKEN == "brand_new_token"
+
+
 # ── model resolution ──────────────────────────────────────────────
 
 def test_resolve_model_claude_alias(monkeypatch):

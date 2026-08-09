@@ -391,29 +391,36 @@ async def _fetch_sources() -> None:
             except Exception:
                 pass
 
-        # webshare free-tier API (only if token configured)
+        # webshare free-tier API (supports single or comma-separated tokens)
         async def webshare():
             nonlocal added, ok
             if not WEBSHARE_TOKEN:
                 return
-            try:
-                r = await c.get(
-                    "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100",
-                    headers={"Authorization": f"Token {WEBSHARE_TOKEN}"})
-                if r.status_code != 200:
-                    return
-                ok += 1
-                for e in r.json().get("results", []):
-                    if not e.get("valid"):
-                        continue
-                    addr = f"{e.get('proxy_address')}:{e.get('port')}"
-                    key = f"http://{addr}"
-                    if addr in POOL.lanes or key in POOL.candidates:
-                        continue
-                    POOL.candidates[key] = now
-                    added += 1
-            except Exception:
-                pass
+            # Split tokens by comma to support multiple Webshare keys
+            tokens = [t.strip() for t in WEBSHARE_TOKEN.split(",") if t.strip()]
+            
+            async def fetch_one_token(token):
+                nonlocal added, ok
+                try:
+                    r = await c.get(
+                        "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100",
+                        headers={"Authorization": f"Token {token}"})
+                    if r.status_code != 200:
+                        return
+                    ok += 1
+                    for e in r.json().get("results", []):
+                        if not e.get("valid"):
+                            continue
+                        addr = f"{e.get('proxy_address')}:{e.get('port')}"
+                        key = f"http://{addr}"
+                        if addr in POOL.lanes or key in POOL.candidates:
+                            continue
+                        POOL.candidates[key] = now
+                        added += 1
+                except Exception:
+                    pass
+
+            await asyncio.gather(*[fetch_one_token(tok) for tok in tokens])
 
         await asyncio.gather(*[one(u, k) for u, k in TEXT_SOURCES], geonode(), webshare())
     POOL.sources_ok = ok
@@ -1023,7 +1030,18 @@ async def post_settings(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
-    return apply_settings({k: v for k, v in body.items() if k in DEFAULTS})
+    
+    updates = {}
+    for k, v in body.items():
+        if k in DEFAULTS:
+            # If the input looks masked (ends with '...' or is '(none)'),
+            # ignore it so we don't overwrite the actual key on disk.
+            if k in ("upstream_api_key", "relay_api_key", "webshare_token") and isinstance(v, str):
+                if v.endswith("...") or v == "(none)":
+                    continue
+            updates[k] = v
+            
+    return apply_settings(updates)
 
 
 @app.get("/api/logs")
