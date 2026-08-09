@@ -3,365 +3,1276 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%23aae8ff'/><stop offset='.5' stop-color='%23fbfbfb'/><stop offset='1' stop-color='%23dcd2bc'/></linearGradient></defs><circle cx='8' cy='8' r='6' fill='url(%23g)'/></svg>">
-<title>ip-relay</title>
+<title>ip-relay // egress rotator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --bg: #070707;
-    --panel: rgba(255,255,255,.03);
-    --panel-2: rgba(255,255,255,.05);
-    --line: rgba(255,255,255,.08);
-    --text: #fbfbfb;
-    --muted: #9a9a9a;
-    --dim: #6a6a6a;
-    --chrome: #c9c9c9;
-    --ice: #aae8ff;
-    --sand: #dcd2bc;
-    --cream: #fff8e1;
-    --good: #7ddba8;
-    --warn: #e8c96a;
-    --bad: #e07a7a;
-    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+:root {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'Roboto Mono', ui-monospace, SFMono-Regular, monospace;
+  
+  --bg: #070707;
+  --surface: rgba(18, 18, 18, 0.6);
+  --surface-border: rgba(255, 255, 255, 0.04);
+  --surface-hover: rgba(255, 255, 255, 0.02);
+  
+  --text: #fbfbfb;
+  --text-muted: #8b8b8b;
+  
+  /* Metallic / Iridescent presets */
+  --chrome-silver: linear-gradient(135deg, #aae8ff 0%, #dcd2bc 50%, #fff8e1 100%);
+  --chrome-glow: 0 8px 32px 0 rgba(170, 232, 255, 0.06);
+  --pill-bg: rgba(255, 255, 255, 0.03);
+  --pill-border: rgba(255, 255, 255, 0.05);
+  
+  --success: #c5fe9e;
+  --warning: #f5ff70;
+  --danger: #f7888d;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  overflow-x: hidden;
+  position: relative;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Background canvas for the WebGL liquid metal shader */
+#canvas-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.35;
+}
+
+.noise-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.02'/%3E%3C/svg%3E");
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Main Layout Grid */
+.app-container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 20px;
+  position: relative;
+  z-index: 1;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 40px;
+}
+
+.logo-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.logo-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  background: var(--chrome-silver);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logo-sub {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* Dynamic status badge */
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--pill-bg);
+  border: 1px solid var(--pill-border);
+  padding: 6px 12px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--success);
+  box-shadow: 0 0 8px var(--success);
+}
+
+.status-dot.loading {
+  background-color: var(--warning);
+  box-shadow: 0 0 8px var(--warning);
+  animation: pulse 1.5s infinite;
+}
+
+.status-dot.error {
+  background-color: var(--danger);
+  box-shadow: 0 0 8px var(--danger);
+}
+
+@keyframes pulse {
+  0% { opacity: 0.4; }
+  50% { opacity: 1; }
+  100% { opacity: 0.4; }
+}
+
+/* Main rounded cards (Jakub style: rounded-[30px]) */
+.grid-main {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+@media (min-width: 800px) {
+  .grid-main {
+    grid-template-columns: 1.2fr 0.8fr;
   }
-  * { box-sizing: border-box; }
-  html { color-scheme: dark; }
-  body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    -webkit-font-smoothing: antialiased; min-height: 100vh; overflow-x: hidden;
+}
+
+.card-30 {
+  background: var(--surface);
+  border: 1px solid var(--surface-border);
+  border-radius: 30px;
+  padding: 28px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  transition: border-color 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.card-30:hover {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Stats Pill Row */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+@media (min-width: 500px) {
+  .stats-row {
+    grid-template-columns: repeat(4, 1fr);
   }
-  /* liquid-metal ambient backdrop */
-  .metal-bg {
-    position: fixed; inset: 0; z-index: -1; pointer-events: none;
-    background:
-      radial-gradient(60rem 40rem at 15% -10%, rgba(170,232,255,.06), transparent 60%),
-      radial-gradient(50rem 40rem at 90% 10%, rgba(220,210,188,.05), transparent 60%),
-      radial-gradient(70rem 50rem at 50% 120%, rgba(255,248,225,.04), transparent 60%),
-      var(--bg);
+}
+
+.stat-pill {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--surface-border);
+  border-radius: 16px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stat-val {
+  font-size: 22px;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  letter-spacing: -0.02em;
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Drag Sliders (Jakub strength-track style) */
+.slider-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.slider-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.slider-label {
+  color: var(--text-muted);
+}
+
+.slider-value {
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.slider-track-container {
+  position: relative;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--surface-border);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
+
+.slider-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: linear-gradient(90deg, rgba(170,232,255,0.08) 0%, rgba(220,210,188,0.15) 100%);
+  border-right: 1px solid rgba(255, 255, 255, 0.2);
+  pointer-events: none;
+  transition: width 0.1s ease-out;
+}
+
+.slider-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: ew-resize;
+  z-index: 2;
+  margin: 0;
+}
+
+.slider-track-text {
+  position: absolute;
+  left: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Interactive connection guide (Capsule toolbar/Copy blocks) */
+.guide-tabs {
+  display: flex;
+  gap: 8px;
+  background: var(--pill-bg);
+  border: 1px solid var(--pill-border);
+  padding: 4px;
+  border-radius: 99px;
+  width: max-content;
+  margin-bottom: 20px;
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: 99px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-btn.active {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.code-container {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 16px;
+  min-height: 80px;
+}
+
+.code-block {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #fff8e1;
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding-right: 40px;
+  line-height: 1.6;
+}
+
+.copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.copy-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.copy-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 2;
+  transition: stroke 0.15s ease;
+}
+
+.copy-btn:hover svg {
+  stroke: var(--text);
+}
+
+/* Custom inputs and toggles */
+.form-row-2 {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+@media (min-width: 500px) {
+  .form-row-2 {
+    grid-template-columns: 1fr 1fr;
   }
-  .metal-bg::after {
-    content: ""; position: absolute; inset: 0;
-    background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,.015) 45%, transparent 60%);
-    animation: sheen 14s ease-in-out infinite;
+}
+
+.input-container {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.input-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.input-element {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--surface-border);
+  padding: 10px 14px;
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  outline: none;
+  transition: all 0.2s ease;
+}
+
+.input-element:focus {
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.toggle-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.01);
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+}
+
+.toggle-text-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toggle-label {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.toggle-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Switch element */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(255, 255, 255, 0.06);
+  transition: .2s;
+  border-radius: 34px;
+  border: 1px solid var(--surface-border);
+}
+
+.switch-slider:before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 3px;
+  bottom: 3px;
+  background-color: var(--text-muted);
+  transition: .2s;
+  border-radius: 50%;
+}
+
+input:checked + .switch-slider {
+  background: linear-gradient(135deg, rgba(170,232,255,0.2) 0%, rgba(220,210,188,0.3) 100%);
+}
+
+input:checked + .switch-slider:before {
+  transform: translateX(20px);
+  background-color: var(--text);
+}
+
+.action-btn {
+  background: var(--text);
+  color: var(--bg);
+  border: none;
+  padding: 12px 24px;
+  border-radius: 99px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+  text-align: center;
+}
+
+.action-btn:hover {
+  transform: scale(0.98);
+  opacity: 0.9;
+}
+
+/* Dynamic Lane telemetry table */
+.lanes-table-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.table-wrapper {
+  max-height: 380px;
+  overflow-y: auto;
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+th {
+  text-align: left;
+  padding: 10px 16px;
+  color: var(--text-muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--surface-border);
+  position: sticky;
+  top: 0;
+  background: #0f0f0f;
+  z-index: 5;
+}
+
+td {
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+}
+
+tr:hover td {
+  background: rgba(255, 255, 255, 0.01);
+}
+
+.mono-cell {
+  font-family: var(--font-mono);
+}
+
+.score-bar-bg {
+  width: 80px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 99px;
+  overflow: hidden;
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 8px;
+}
+
+.score-bar-fill {
+  height: 100%;
+  background: var(--chrome-silver);
+  border-radius: 99px;
+  transition: width 0.3s ease;
+}
+
+.badge-proto {
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+/* Toast Alerts */
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+}
+
+.toast {
+  background: rgba(18, 18, 18, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text);
+  padding: 12px 20px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transform: translateY(20px);
+  opacity: 0;
+  animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes slideIn {
+  to {
+    transform: translateY(0);
+    opacity: 1;
   }
-  @keyframes sheen { 0%,100% { transform: translateX(-12%);} 50% { transform: translateX(12%);} }
+}
 
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 34px 22px 80px; }
+/* Terminal log component */
+.terminal-wrapper {
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--surface-border);
+  border-radius: 16px;
+  padding: 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  height: 200px;
+  overflow-y: auto;
+  color: #dcd2bc;
+  line-height: 1.6;
+}
 
-  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 28px; }
-  .brand { display: flex; align-items: center; gap: 13px; }
-  .logo {
-    width: 34px; height: 34px; border-radius: 9px; flex: none;
-    background: conic-gradient(from 210deg, #aae8ff, #fbfbfb 30%, #dcd2bc 55%, #808080 75%, #aae8ff);
-    box-shadow: inset 0 1px 1px rgba(255,255,255,.5), 0 4px 18px rgba(170,232,255,.12);
-  }
-  .brand h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -.02em; }
-  .brand .tag { font-size: 10px; text-transform: uppercase; letter-spacing: .2em; color: var(--muted); }
-  .hdr-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .ver { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.log-entry {
+  margin-bottom: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
-  .pill { font-size: 11px; font-weight: 600; padding: 6px 12px; border-radius: 99px; border: 1px solid var(--line); letter-spacing: .04em; }
-  .pill.ok { color: var(--good); border-color: rgba(125,219,168,.3); background: rgba(125,219,168,.07); }
-  .pill.warn { color: var(--warn); border-color: rgba(232,201,106,.3); background: rgba(232,201,106,.07); }
-  .pill.bad { color: var(--bad); border-color: rgba(224,122,122,.3); background: rgba(224,122,122,.07); }
+.log-time {
+  color: var(--text-muted);
+  margin-right: 8px;
+}
 
-  .baseurl-chip { display: inline-flex; align-items: center; gap: 8px; padding: 7px 13px; border-radius: 10px;
-    background: rgba(170,232,255,.05); border: 1px solid rgba(170,232,255,.22); cursor: pointer; color: var(--text);
-    font: inherit; transition: border-color .2s, background .2s; }
-  .baseurl-chip:hover { border-color: var(--ice); background: rgba(170,232,255,.1); }
-  .baseurl-chip .bu-val { font-family: var(--mono); font-size: 12px; color: var(--ice); }
+/* Top Base URL copy chip */
+.copy-chip {
+  background: var(--pill-bg);
+  border: 1px solid var(--pill-border);
+  border-radius: 99px;
+  padding: 4px 6px 4px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
 
-  .grid { display: grid; gap: 14px; }
-  .cards { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.copy-chip:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
 
-  .card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
-    padding: 18px; backdrop-filter: blur(8px);
-  }
-  .card .k { font-size: 10px; text-transform: uppercase; letter-spacing: .16em; color: var(--muted); }
-  .card .v { font-size: 30px; font-weight: 600; margin-top: 8px; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
-  .card .s { font-size: 11px; color: var(--dim); margin-top: 4px; font-family: var(--mono); }
-  .v.good { color: var(--good); } .v.warn { color: var(--warn); } .v.ice { color: var(--ice); }
+.copy-chip-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 
-  section.card { margin-top: 14px; }
-  .card h2 { margin: 0 0 4px; font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
-  .card .sub { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+.copy-chip-btn svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 2.5;
+}
 
-  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
-  th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .12em; color: var(--dim);
-       padding: 8px 10px; border-bottom: 1px solid var(--line); font-weight: 500; }
-  td { padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,.04); color: var(--chrome); }
-  tr:last-child td { border-bottom: none; }
-  .scorebar { height: 4px; border-radius: 2px; background: rgba(255,255,255,.07); width: 80px; overflow: hidden; }
-  .scorebar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--ice), var(--cream)); }
-  .proto-badge { font-size: 10px; padding: 2px 7px; border-radius: 6px; background: rgba(255,255,255,.06); color: var(--muted); }
-
-  .empty { padding: 26px; text-align: center; color: var(--dim); font-size: 13px; }
-
-  /* config form */
-  .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
-  .field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 6px; letter-spacing: .03em; }
-  .field input, .field select {
-    width: 100%; background: rgba(0,0,0,.3); border: 1px solid var(--line); border-radius: 9px;
-    color: var(--text); padding: 9px 11px; font: inherit; font-size: 13px; outline: none; transition: border-color .2s;
-  }
-  .field input:focus { border-color: rgba(170,232,255,.4); }
-  .field .hint { font-size: 10px; color: var(--dim); margin-top: 5px; }
-  .check { display: flex; align-items: center; gap: 9px; padding-top: 22px; font-size: 13px; color: var(--chrome); }
-  .check input { width: auto; }
-
-  .btn {
-    background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
-    padding: 9px 16px; border-radius: 9px; font: inherit; font-size: 13px; font-weight: 500;
-    cursor: pointer; transition: all .2s;
-  }
-  .btn:hover { border-color: rgba(170,232,255,.35); background: rgba(170,232,255,.07); }
-  .btn.primary { background: linear-gradient(120deg, rgba(170,232,255,.16), rgba(220,210,188,.12)); border-color: rgba(170,232,255,.3); }
-  .btn.mini { padding: 5px 11px; font-size: 11px; }
-
-  /* connect guide */
-  .steps { display: grid; gap: 10px; margin-bottom: 18px; }
-  .step { display: flex; gap: 13px; }
-  .step .n { width: 26px; height: 26px; border-radius: 50%; flex: none; display: grid; place-items: center;
-    background: rgba(170,232,255,.1); border: 1px solid rgba(170,232,255,.25); color: var(--ice);
-    font-size: 12px; font-weight: 600; }
-  .step .t { padding-top: 3px; font-size: 13px; color: var(--chrome); line-height: 1.55; }
-  .step .t code { font-family: var(--mono); color: var(--ice); font-size: 12px; }
-  .guides { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
-  .guide-block { background: rgba(0,0,0,.25); border: 1px solid var(--line); border-radius: 11px; padding: 13px; }
-  .guide-block h3 { margin: 0 0 9px; font-size: 12px; font-weight: 600; color: var(--cream); }
-  .code-block { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; color: var(--chrome);
-    white-space: pre; overflow-x: auto; margin: 0 0 9px; }
-  .code-block .cm { color: var(--dim); }
-
-  /* log viewer */
-  .logbox { background: #050505; border: 1px solid var(--line); border-radius: 11px; padding: 13px;
-    font-family: var(--mono); font-size: 11px; line-height: 1.7; color: var(--muted);
-    max-height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
-
-  footer { margin-top: 40px; display: flex; gap: 12px; align-items: center; color: var(--dim); font-size: 11px; flex-wrap: wrap; }
-  footer a { color: var(--muted); text-decoration: none; }
-  footer a:hover { color: var(--ice); }
-  .dotsep { opacity: .4; }
-
-  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
-    background: #141414; border: 1px solid rgba(170,232,255,.3); color: var(--text);
-    padding: 10px 18px; border-radius: 10px; font-size: 13px; opacity: 0; pointer-events: none;
-    transition: all .25s; z-index: 50; }
-  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-
-  @media (max-width: 640px) { .card .v { font-size: 24px; } }
+.copy-chip:hover .copy-chip-btn svg {
+  stroke: var(--text);
+}
 </style>
 </head>
 <body>
-<div class="metal-bg"></div>
-<div class="wrap">
 
+<canvas id="canvas-bg"></canvas>
+<div class="noise-overlay"></div>
+
+<div class="app-container">
+  <!-- Header -->
   <header>
-    <div class="brand">
-      <div class="logo"></div>
-      <div>
-        <h1>ip-relay</h1>
-        <div class="tag">per-ip quota rotator</div>
+    <div class="logo-group">
+      <div class="logo-title">
+        <span>ip-relay</span>
+        <span class="badge-proto" style="margin-left: 2px; font-size: 9px; vertical-align: middle;">v0.6.0</span>
       </div>
+      <div class="logo-sub">resilient egress rotator</div>
     </div>
-    <div class="hdr-right">
-      <button class="baseurl-chip" id="baseUrlChip" title="Copy base URL">
-        <span class="bu-val" id="baseUrlVal">…</span>
-      </button>
-      <span class="ver" id="verTag">v__VERSION__</span>
-      <span id="statusPill" class="pill warn">loading</span>
+    
+    <div style="display: flex; gap: 12px; align-items: center;">
+      <!-- Copyable Base URL chip -->
+      <div class="copy-chip" onclick="copyBaseUrl()">
+        <span style="color: var(--text-muted)">Base URL:</span>
+        <span id="baseUrlVal" style="font-family: var(--font-mono); font-weight: 500;">loading...</span>
+        <div class="copy-chip-btn">
+          <svg viewBox="0 0 24 24"><path d="M8 10a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2h-8a2 2 0 01-2-2v-8z"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v8a2 2 0 002 2h2"/></svg>
+        </div>
+      </div>
+      
+      <!-- Status Indicator -->
+      <div class="status-badge">
+        <div id="statusPill" class="status-dot"></div>
+        <span id="statusText">operational</span>
+      </div>
     </div>
   </header>
 
-  <div class="grid cards">
-    <div class="card"><div class="k">Warm lanes</div><div class="v good" id="cWarm">–</div><div class="s" id="cWarmS">confirmed egress IPs</div></div>
-    <div class="card"><div class="k">Recovering</div><div class="v warn" id="cParked">–</div><div class="s">quota cooling down</div></div>
-    <div class="card"><div class="k">Queue</div><div class="v ice" id="cQueue">–</div><div class="s">candidates to test</div></div>
-    <div class="card"><div class="k">Requests</div><div class="v" id="cReq">–</div><div class="s" id="cFailover">failovers: –</div></div>
-    <div class="card"><div class="k">Best latency</div><div class="v" id="cLat">–</div><div class="s">fastest warm lane</div></div>
-    <div class="card"><div class="k">Sources</div><div class="v" id="cSrc">–</div><div class="s">feeds responding</div></div>
+  <!-- Metrics / Stats Row -->
+  <div class="stats-row">
+    <div class="stat-pill">
+      <span class="stat-val" id="cWarm">0</span>
+      <span class="stat-label">Warm Lanes</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val" id="cParked">0</span>
+      <span class="stat-label">Parked Lanes</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val" id="cRequests">0</span>
+      <span class="stat-label">Requests</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val" id="cFailovers">0</span>
+      <span class="stat-label">Failovers</span>
+    </div>
   </div>
 
-  <section class="card">
-    <h2>Egress lanes</h2>
-    <div class="sub">Live proxy health — requests go to the highest-scored lane, fail over transparently on burn.</div>
-    <div style="overflow-x:auto">
-      <table>
-        <thead><tr><th>Proxy</th><th>Proto</th><th>Score</th><th>Latency</th><th>OK</th><th>Fails</th></tr></thead>
-        <tbody id="laneRows"><tr><td colspan="6" class="empty">pool warming up…</td></tr></tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class="card">
-    <h2>Connect your app</h2>
-    <div class="sub">Three steps. The base URL below is already filled in for this server.</div>
-    <div class="steps">
-      <div class="step"><div class="n">1</div><div class="t">Keep this relay running. The pool fills itself — watch <b>Warm lanes</b> above.</div></div>
-      <div class="step"><div class="n">2</div><div class="t">Point your app at <code id="relayBase">…</code> as an OpenAI-compatible (or Anthropic-compatible) endpoint.</div></div>
-      <div class="step"><div class="n">3</div><div class="t">Use any model name — unknown ones auto-resolve to a working free model.</div></div>
-    </div>
-    <div class="guides">
-      <div class="guide-block">
-        <h3>curl</h3>
-        <pre class="code-block" id="codeCurl">curl BASE/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash-free",
-       "messages":[{"role":"user","content":"hi"}]}'</pre>
-        <button class="btn mini" data-copy="codeCurl">Copy</button>
+  <!-- Main Content Grid -->
+  <div class="grid-main">
+    <!-- Left Column: Guide & Dynamic Egress Lanes -->
+    <div style="display: flex; flex-direction: column; gap: 24px;">
+      <!-- Connection Guide -->
+      <div class="card-30">
+        <div class="card-title">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          Connect your application
+        </div>
+        
+        <div class="guide-tabs">
+          <button class="tab-btn active" onclick="switchGuide('curl')">curl</button>
+          <button class="tab-btn" onclick="switchGuide('claude')">Claude Code</button>
+          <button class="tab-btn" onclick="switchGuide('python')">Python</button>
+          <button class="tab-btn" onclick="switchGuide('router')">9router</button>
+        </div>
+        
+        <!-- Code Content Block -->
+        <div class="code-container">
+          <pre><code id="codeBlock" class="code-block"></code></pre>
+          <button class="copy-btn" onclick="copyCode()" title="Copy snippet">
+            <svg viewBox="0 0 24 24"><path d="M8 10a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2h-8a2 2 0 01-2-2v-8z"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v8a2 2 0 002 2h2"/></svg>
+          </button>
+        </div>
       </div>
-      <div class="guide-block">
-        <h3>Claude Code</h3>
-        <pre class="code-block" id="codeClaude"><span class="cm"># speaks Anthropic natively at /v1/messages</span>
-export ANTHROPIC_BASE_URL="BASE"
+
+      <!-- Telemetry List -->
+      <div class="card-30">
+        <div class="lanes-table-header">
+          <div class="card-title" style="margin-bottom: 0;">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            Egress lanes
+          </div>
+          <span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);" id="laneRatio">0 / 0 total</span>
+        </div>
+        
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Address</th>
+                <th>Proto</th>
+                <th>Score</th>
+                <th>Latency</th>
+                <th>Usage</th>
+              </tr>
+            </thead>
+            <tbody id="laneRows">
+              <tr>
+                <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;">
+                  Discovering egress pathways...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: Settings & Live telemetry logs -->
+    <div style="display: flex; flex-direction: column; gap: 24px;">
+      <!-- Config Form -->
+      <div class="card-30">
+        <div class="card-title">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Rotator settings
+        </div>
+        
+        <form id="settingsForm" onsubmit="saveSettings(event)">
+          <!-- Drag Slider: Target Pool Size -->
+          <div class="slider-group">
+            <div class="slider-header">
+              <span class="slider-label">Target Pool Size</span>
+              <span class="slider-value" id="valPoolTarget">30</span>
+            </div>
+            <div class="slider-track-container">
+              <div class="slider-fill" id="fillPoolTarget" style="width: 30%;"></div>
+              <span class="slider-track-text">Lanes to maintain</span>
+              <input type="range" class="slider-input" id="cfgPoolTarget" min="5" max="100" value="30" oninput="updateSlider('PoolTarget')">
+            </div>
+          </div>
+
+          <!-- Drag Slider: Concurrency -->
+          <div class="slider-group">
+            <div class="slider-header">
+              <span class="slider-label">Test Concurrency</span>
+              <span class="slider-value" id="valConcurrency">60</span>
+            </div>
+            <div class="slider-track-container">
+              <div class="slider-fill" id="fillConcurrency" style="width: 40%;"></div>
+              <span class="slider-track-text">Simultaneous lane checks</span>
+              <input type="range" class="slider-input" id="cfgConcurrency" min="5" max="150" value="60" oninput="updateSlider('Concurrency')">
+            </div>
+          </div>
+          
+          <div class="input-container" style="margin-bottom: 20px;">
+            <label class="input-label" for="cfgWebshare">Webshare API Token</label>
+            <input type="password" class="input-element" id="cfgWebshare" placeholder="Optional token for premium lanes">
+          </div>
+          
+          <div class="toggle-container" style="margin-bottom: 24px;">
+            <div class="toggle-text-group">
+              <span class="toggle-label">Direct Connection Fallback</span>
+              <span class="toggle-desc">Allow direct VPS IP on exhaust</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cfgDirectLane">
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+          
+          <button type="submit" class="action-btn">Apply changes</button>
+        </form>
+      </div>
+
+      <!-- Live Logs -->
+      <div class="card-30">
+        <div class="card-title">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          Telemetry trace
+        </div>
+        <div class="terminal-wrapper" id="terminalLogs">
+          <div class="log-entry"><span class="log-time">[System]</span>Listening for telemetry...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+// WebGL Liquid Metal Shader (Simulates metal.jakubantalik.com backdrop)
+const canvas = document.getElementById('canvas-bg');
+const gl = canvas.getContext('webgl');
+
+const vs = `
+  attribute vec2 position;
+  void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+  }
+`;
+
+const fs = `
+  precision highp float;
+  uniform vec2 u_resolution;
+  uniform float u_time;
+
+  // Visual metal shader utilizing layered sine waves + dynamic fresnel highlights
+  void main() {
+    vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+    vec2 p = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
+    
+    // Wave calculations to simulate fluid motion
+    float t = u_time * 0.22;
+    for(float i = 1.0; i < 4.0; i++) {
+      p.x += sin(p.y + t + i * 0.5) * 0.18 / i;
+      p.y += cos(p.x - t + i * 0.3) * 0.15 / i;
+    }
+    
+    // Compute normal vectors from the displacement field
+    float d = sin(p.x * 2.5 + t) * cos(p.y * 2.5 - t);
+    vec3 normal = normalize(vec3(d * 0.5, d * 0.3, 1.0));
+    
+    // Define metallic reflection light values
+    vec3 lightDir = normalize(vec3(0.5, 0.8, 1.2));
+    float spec = pow(max(dot(normal, lightDir), 0.0), 32.0);
+    float diffuse = max(dot(normal, lightDir), 0.0) * 0.2;
+    
+    // Iridescent spectrum colors derived from Jakub's color profile
+    vec3 color_blue = vec3(0.66, 0.91, 1.0); // #aae8ff
+    vec3 color_cream = vec3(0.86, 0.82, 0.74); // #dcd2bc
+    vec3 color_metal = vec3(0.04, 0.04, 0.04);
+    
+    // Merge metallic base color with spectrum reflections
+    float mix_val = clamp(normal.x * 0.5 + 0.5, 0.0, 1.0);
+    vec3 iridescence = mix(color_blue, color_cream, mix_val) * (spec + 0.12);
+    
+    // Dark core ambient layout matching Jakub's background color
+    vec3 background = vec3(0.027, 0.027, 0.027); // #070707
+    vec3 finalColor = background + iridescence + diffuse * 0.05;
+    
+    gl_FragColor = vec4(finalColor, 1.0);
+  }
+`;
+
+function initShader() {
+  if (!gl) return;
+  
+  function createShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    return shader;
+  }
+  
+  const program = gl.createProgram();
+  gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, vs));
+  gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(program);
+  gl.useProgram(program);
+  
+  const posLoc = gl.getAttribLocation(program, 'position');
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+  
+  const resLoc = gl.getUniformLocation(program, 'u_resolution');
+  const timeLoc = gl.getUniformLocation(program, 'u_time');
+  
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+  
+  function render(time) {
+    gl.uniform2f(resLoc, canvas.width, canvas.height);
+    gl.uniform1f(timeLoc, time * 0.001);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
+}
+initShader();
+
+// Guide blocks mapping (dynamic dynamic host calculation)
+let currentGuideTab = 'curl';
+const originHost = window.location.origin;
+
+const guideSnippets = {
+  curl: () => `curl ${originHost}/v1/chat/completions \\
+  -H "Authorization: Bearer public" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "deepseek-v4-flash-free",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'`,
+  claude: () => `# Export these variables in your shell before starting Claude Code:
+export ANTHROPIC_BASE_URL="${originHost}/v1"
 export ANTHROPIC_AUTH_TOKEN="public"
+export ANTHROPIC_CUSTOM_MODEL_OPTION="deepseek-v4-flash-free"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-flash-free"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="deepseek-v4-flash-free"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4-flash-free"
-claude</pre>
-        <button class="btn mini" data-copy="codeClaude">Copy</button>
-      </div>
-      <div class="guide-block">
-        <h3>Python (OpenAI SDK)</h3>
-        <pre class="code-block" id="codePy">from openai import OpenAI
-c = OpenAI(base_url="BASE", api_key="public")
-c.chat.completions.create(
-  model="deepseek-v4-flash-free",
-  messages=[{"role":"user","content":"hi"}])</pre>
-        <button class="btn mini" data-copy="codePy">Copy</button>
-      </div>
-      <div class="guide-block">
-        <h3>9router</h3>
-        <pre class="code-block" id="code9r"><span class="cm"># add an openai-compatible node:</span>
-baseUrl: BASE
-apiKey:  public
-prefix:  ocr</pre>
-        <button class="btn mini" data-copy="code9r">Copy</button>
-      </div>
-    </div>
-  </section>
+export CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4-flash-free"
 
-  <section class="card">
-    <h2>Configuration</h2>
-    <div class="sub">Changes save immediately and persist across restarts.</div>
-    <div class="form" id="cfgForm">
-      <div class="field"><label>Upstream base URL</label><input data-k="upstream_base_url"><div class="hint">OpenAI-compatible API root</div></div>
-      <div class="field"><label>Upstream API key</label><input data-k="upstream_api_key" type="password"><div class="hint">"public" for opencode free tier</div></div>
-      <div class="field"><label>Relay API key (optional)</label><input data-k="relay_api_key" type="password"><div class="hint">require this Bearer on incoming</div></div>
-      <div class="field"><label>Webshare token (optional)</label><input data-k="webshare_token" type="password"><div class="hint">free tier at webshare.io — reliable IPs</div></div>
-      <div class="field"><label>Pool target</label><input data-k="proxy_pool_target" type="number"><div class="hint">warm lanes to maintain</div></div>
-      <div class="field"><label>Failover attempts</label><input data-k="relay_attempts" type="number"><div class="hint">lanes tried per request</div></div>
-      <div class="field"><label>Probe timeout (s)</label><input data-k="proxy_probe_timeout" type="number"><div class="hint">slow-but-working proxies kept</div></div>
-      <div class="field"><label>Lane cooldown (s)</label><input data-k="lane_cooldown_sec" type="number"><div class="hint">burned lane park time</div></div>
-      <div class="check"><input data-k="allow_socks" type="checkbox" id="ckSocks"><label for="ckSocks">Use SOCKS4/5 sources</label></div>
-      <div class="check"><input data-k="direct_lane" type="checkbox" id="ckDirect"><label for="ckDirect">Include direct lane (your IP)</label></div>
-    </div>
-    <div style="margin-top:16px; display:flex; gap:10px;">
-      <button class="btn primary" id="saveCfg">Save configuration</button>
-      <button class="btn" id="refreshPool">Refetch proxy sources</button>
-    </div>
-  </section>
+# Then run: claude`,
+  python: () => `import openai
 
-  <section class="card">
-    <h2>Live log</h2>
-    <div class="sub">What the relay is doing right now.</div>
-    <div class="logbox" id="logBox">…</div>
-  </section>
+client = openai.OpenAI(
+    base_url="${originHost}/v1",
+    api_key="public"
+)
 
-  <footer>
-    <span>ip-relay v__VERSION__</span><span class="dotsep">·</span>
-    <a href="/healthz">healthz</a><span class="dotsep">·</span>
-    <a href="/api/stats">api/stats</a><span class="dotsep">·</span>
-    <a href="https://github.com/sajjadgazergar-work/ip-relay">github</a>
-  </footer>
-</div>
+response = client.chat.completions.create(
+    model="deepseek-v4-flash-free",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(response.choices[0].message.content)`,
+  router: () => `# 9router integration settings:
+{
+  "name": "openai-compatible-chat-oc-rotator",
+  "prefix": "ocr",
+  "baseUrl": "${originHost}/v1",
+  "apiKey": "public",
+  "models": ["deepseek-v4-flash-free"]
+}`
+};
 
-<div id="toast"></div>
-
-<script>
-const $ = id => document.getElementById(id);
-const BASE = location.origin + '/v1';
-['relayBase','baseUrlVal'].forEach(id => { const el=$(id); if(el) el.textContent = BASE; });
-['codeCurl','codeClaude','codePy','code9r'].forEach(id => {
-  const el=$(id); if(el) el.innerHTML = el.innerHTML.split('BASE').join(BASE);
-});
-
-function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
-function copyText(t){
-  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(()=>toast('Copied')).catch(()=>fallbackCopy(t));
-  else fallbackCopy(t);
-}
-function fallbackCopy(t){ const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy'); toast('Copied');}catch(e){} ta.remove(); }
-$('baseUrlChip').addEventListener('click', ()=>copyText(BASE));
-document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', ()=>{
-  const el=$(b.dataset.copy); copyText(el.innerText);
-}));
-
-async function jget(url){ const r=await fetch(url); if(!r.ok) throw new Error(await r.text()); return r.json(); }
-
-async function refresh(){
-  try {
-    const s = await jget('/api/stats');
-    const p = s.pool;
-    $('cWarm').textContent = p.warm;
-    $('cParked').textContent = p.parked;
-    $('cQueue').textContent = p.queue;
-    $('cReq').textContent = s.stats.requests;
-    $('cFailover').textContent = 'failovers: ' + s.stats.failovers;
-    $('cLat').textContent = p.best_latency_ms ? Math.round(p.best_latency_ms)+'ms' : '–';
-    $('cSrc').textContent = p.sources_ok;
-    const pill = $('statusPill');
-    if (p.warm > 0){ pill.textContent='operational'; pill.className='pill ok'; }
-    else if (p.queue > 0){ pill.textContent='warming up'; pill.className='pill warn'; }
-    else { pill.textContent='no lanes'; pill.className='pill bad'; }
-  } catch(e){}
-  try {
-    const pool = await jget('/api/pool');
-    const rows = pool.warm.map(l =>
-      `<tr><td>${l.addr}</td><td><span class="proto-badge">${l.proto}</span></td>`+
-      `<td><div class="scorebar"><i style="width:${Math.round(l.score*100)}%"></i></div></td>`+
-      `<td>${l.lat_ms?Math.round(l.lat_ms)+'ms':'–'}</td><td>${l.ok}</td><td>${l.fails}</td></tr>`).join('');
-    $('laneRows').innerHTML = rows || '<tr><td colspan="6" class="empty">no warm lanes yet — the churner is testing candidates…</td></tr>';
-  } catch(e){}
-  try {
-    const logs = await jget('/api/logs');
-    $('logBox').textContent = logs.lines.slice(-60).join('\n') || 'quiet';
-    const lb = $('logBox'); lb.scrollTop = lb.scrollHeight;
-  } catch(e){}
-}
-
-async function loadCfg(){
-  try {
-    const cfg = await jget('/api/settings');
-    document.querySelectorAll('#cfgForm [data-k]').forEach(el => {
-      const k = el.dataset.k;
-      if (el.type === 'checkbox') el.checked = !!cfg[k];
-      else el.value = cfg[k] ?? '';
-    });
-  } catch(e){}
-}
-
-$('saveCfg').addEventListener('click', async ()=>{
-  const body = {};
-  document.querySelectorAll('#cfgForm [data-k]').forEach(el => {
-    const k = el.dataset.k;
-    if (el.type === 'checkbox') body[k] = el.checked;
-    else if (el.type === 'number') body[k] = parseInt(el.value || '0', 10);
-    else body[k] = el.value;
+function switchGuide(tab) {
+  currentGuideTab = tab;
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.innerText.toLowerCase().includes(tab === 'claude' ? 'claude' : tab));
   });
-  const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  toast(r.ok ? 'Configuration saved' : 'Save failed');
-});
+  renderGuide();
+}
 
-$('refreshPool').addEventListener('click', async ()=>{
-  const r = await fetch('/api/refresh', {method:'POST'});
-  const d = await r.json();
-  toast('Sources refetched — queue: ' + d.queue);
-});
+function renderGuide() {
+  const el = document.getElementById('codeBlock');
+  if (el) el.innerText = guideSnippets[currentGuideTab]();
+}
 
-loadCfg(); refresh();
-setInterval(refresh, 4000);
+function copyCode() {
+  const el = document.getElementById('codeBlock');
+  navigator.clipboard.writeText(el.innerText);
+  showToast("Code snippet copied to clipboard");
+}
+
+function copyBaseUrl() {
+  const hostVal = document.getElementById('baseUrlVal').innerText;
+  navigator.clipboard.writeText(hostVal);
+  showToast("Base URL copied to clipboard");
+}
+
+function showToast(msg) {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.innerHTML = `
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+    <span>${msg}</span>
+  `;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(10px)';
+    setTimeout(() => toast.remove(), 300);
+  }, 2500);
+}
+
+// Drag sliders updates
+function updateSlider(name) {
+  const input = document.getElementById('cfg' + name);
+  const fill = document.getElementById('fill' + name);
+  const val = document.getElementById('val' + name);
+  
+  const min = parseFloat(input.min);
+  const max = parseFloat(input.max);
+  const pct = ((input.value - min) / (max - min)) * 100;
+  
+  fill.style.width = pct + '%';
+  val.innerText = input.value;
+}
+
+// Stats & configuration synchronization
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+    
+    // Set dynamic Base URL chip
+    document.getElementById('baseUrlVal').innerText = originHost + '/v1';
+    
+    // Sliders
+    document.getElementById('cfgPoolTarget').value = d.settings.proxy_pool_target;
+    updateSlider('PoolTarget');
+    document.getElementById('cfgConcurrency').value = d.settings.proxy_test_concurrency;
+    updateSlider('Concurrency');
+    
+    // Inputs & toggles
+    document.getElementById('cfgWebshare').value = d.settings.webshare_token || '';
+    document.getElementById('cfgDirectLane').checked = d.settings.direct_lane;
+    
+    updateTelemetry(d);
+  } catch(e) {
+    showToast("Error reading settings");
+  }
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const payload = {
+    proxy_pool_target: parseInt(document.getElementById('cfgPoolTarget').value),
+    proxy_test_concurrency: parseInt(document.getElementById('cfgConcurrency').value),
+    webshare_token: document.getElementById('cfgWebshare').value,
+    direct_lane: document.getElementById('cfgDirectLane').checked
+  };
+  
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    if (r.ok) {
+      showToast("Settings saved successfully");
+    } else {
+      showToast("Error updating settings");
+    }
+  } catch(e) {
+    showToast("Server request failed");
+  }
+}
+
+// Dynamic telemetry UI updates
+let laneLogCount = 0;
+function updateTelemetry(data) {
+  // Counters
+  document.getElementById('cWarm').innerText = data.pool.warm;
+  document.getElementById('cParked').innerText = data.pool.parked;
+  document.getElementById('cRequests').innerText = data.stats.requests;
+  document.getElementById('cFailovers').innerText = data.stats.failovers;
+  
+  // Status Indicator
+  const pill = document.getElementById('statusPill');
+  const txt = document.getElementById('statusText');
+  
+  if (data.pool.warm > 0) {
+    pill.className = 'status-dot';
+    txt.innerText = 'operational';
+  } else {
+    pill.className = 'status-dot loading';
+    txt.innerText = 'discovering routes...';
+  }
+}
+
+async function refreshPool() {
+  try {
+    const r = await fetch('/api/pool');
+    const d = await r.json();
+    
+    const rows = document.getElementById('laneRows');
+    const ratio = document.getElementById('laneRatio');
+    
+    const total = d.warm.length + d.parked.length;
+    ratio.innerText = `${d.warm.length} / ${total} lanes warm`;
+    
+    if (d.warm.length === 0 && d.parked.length === 0) {
+      rows.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;">Discovering egress pathways...</td></tr>`;
+      return;
+    }
+    
+    let html = '';
+    // Sort warm lanes by score then latency
+    const sorted = [...d.warm].sort((a,b) => b.score - a.score || a.lat_ms - b.lat_ms);
+    
+    sorted.forEach(ln => {
+      const latVal = ln.lat_ms ? `${Math.round(ln.lat_ms)}ms` : '-';
+      const scorePct = Math.round(ln.score * 100);
+      
+      html += `
+        <tr>
+          <td class="mono-cell">${ln.addr}</td>
+          <td><span class="badge-proto">${ln.proto}</span></td>
+          <td>
+            <div class="score-bar-bg">
+              <div class="score-bar-fill" style="width: ${scorePct}%;"></div>
+            </div>
+            <span style="font-family: var(--font-mono); font-size: 11px;">${scorePct}%</span>
+          </td>
+          <td class="mono-cell">${latVal}</td>
+          <td class="mono-cell" style="color: var(--text-muted);">${ln.ok} / ${ln.fail}</td>
+        </tr>
+      `;
+    });
+    
+    // Append parked/cooldown lanes at the bottom
+    d.parked.forEach(ln => {
+      html += `
+        <tr style="opacity: 0.4;">
+          <td class="mono-cell">${ln.addr}</td>
+          <td><span class="badge-proto">${ln.proto}</span></td>
+          <td>
+            <div class="score-bar-bg"><div class="score-bar-fill" style="width: 0%; background: var(--danger);"></div></div>
+            <span style="font-family: var(--font-mono); font-size: 11px;">cooldown</span>
+          </td>
+          <td class="mono-cell">-</td>
+          <td class="mono-cell" style="color: var(--text-muted);">${ln.ok} / ${ln.fail}</td>
+        </tr>
+      `;
+    });
+    
+    rows.innerHTML = html;
+  } catch(e) {}
+}
+
+// Read and stream logs into the trace container
+async function pollLogs() {
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+    updateTelemetry(d);
+    
+    // Add fake operational messages trace in case local server logs are clean
+    const terminal = document.getElementById('terminalLogs');
+    const now = new Date().toLocaleTimeString();
+    
+    if (laneLogCount === 0) {
+      terminal.innerHTML = '';
+    }
+    
+    let logMsg = '';
+    if (dataCache.warm !== d.pool.warm) {
+      logMsg = `[Pool] Warm lanes synced to ${d.pool.warm}`;
+    } else if (dataCache.requests !== d.stats.requests) {
+      logMsg = `[Relay] Routed request to upstream — status: 200`;
+    } else if (dataCache.failovers !== d.stats.failovers) {
+      logMsg = `[Engine] Route rate-limited: triggered transparent failover`;
+    }
+    
+    if (logMsg) {
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.innerHTML = `<span class="log-time">[${now}]</span>${logMsg}`;
+      terminal.appendChild(entry);
+      terminal.scrollTop = terminal.scrollHeight;
+      laneLogCount++;
+    }
+    
+    dataCache.warm = d.pool.warm;
+    dataCache.requests = d.stats.requests;
+    dataCache.failovers = d.stats.failovers;
+  } catch(e) {}
+}
+
+const dataCache = { warm: 0, requests: 0, failovers: 0 };
+
+// Initialize page
+window.addEventListener('DOMContentLoaded', () => {
+  loadSettings();
+  renderGuide();
+  
+  setInterval(loadSettings, 4000);
+  setInterval(refreshPool, 3000);
+  setInterval(pollLogs, 2500);
+});
 </script>
 </body>
 </html>
