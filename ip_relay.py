@@ -739,6 +739,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .brand h1 { margin:0; font-size:21px; letter-spacing:-.02em; }
   .brand .tag { font-size:10.5px; text-transform:uppercase; letter-spacing:.18em; color:var(--muted); }
   .hdr-right { display:flex; align-items:center; gap:14px; }
+  .baseurl-chip { display:inline-flex; align-items:center; gap:8px; padding:7px 13px; border-radius:10px;
+    background:rgba(34,211,238,.07); border:1px solid rgba(34,211,238,.28); cursor:pointer;
+    color:var(--text); transition:border-color .2s, background .2s; }
+  .baseurl-chip:hover { border-color:var(--cyan); background:rgba(34,211,238,.14); }
+  .baseurl-chip svg { width:13px; height:13px; color:var(--cyan); flex:none; }
+  .baseurl-chip .bu-lbl { font-size:9px; font-weight:700; letter-spacing:.14em; color:var(--muted); }
+  .baseurl-chip .bu-val { font-family:var(--mono); font-size:12px; color:var(--cyan); }
+  @media (max-width:640px){ .baseurl-chip .bu-lbl{ display:none; } .baseurl-chip .bu-val{ max-width:46vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } }
   .uptime { font-family:var(--mono); font-size:12px; color:var(--muted); }
 
   /* ── pills ── */
@@ -926,6 +934,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="hdr-right">
+      <button class="baseurl-chip" id="baseUrlChip" title="Copy base URL">
+        <span class="bu-lbl">BASE URL</span>
+        <span class="bu-val" id="baseUrlVal">…</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
       <span class="uptime" id="poolAge">pool warming…</span>
       <span id="statusPill" class="pill warn">loading</span>
     </div>
@@ -1158,10 +1171,11 @@ function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('sho
 
 // dynamic base URL — the dashboard knows where it's being served from
 const BASE = location.origin + '/v1';
-['relayBase','relayBase2'].forEach(id => { const el=$(id); if(el) el.textContent = BASE; });
+['relayBase','relayBase2','baseUrlVal'].forEach(id => { const el=$(id); if(el) el.textContent = BASE; });
 ['codeCurl','codeClaude','codePy','code9r'].forEach(id => {
   const el=$(id); if(el) el.innerHTML = el.innerHTML.split('BASE').join(BASE);
 });
+$('baseUrlChip').addEventListener('click', ()=>{ copyText(BASE); toast('Base URL copied: ' + BASE); });
 
 async function jget(url){ const r=await fetch(url); if(r.status===401){ window.location.href='/login'; throw new Error('unauthorized'); } if(!r.ok) throw new Error((await r.text()).slice(0,120)); return r.json(); }
 
