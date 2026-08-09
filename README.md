@@ -2,11 +2,11 @@
 
 **Turn one free API key into a whole pool of free API keys — automatically.**
 
-[🇮🇷 راهنمای فارسی](README.fa.md) · [Benchmark — does it work?](BENCHMARK.md) · [Dashboard screenshot](docs/dashboard.png)
+[🇮🇷 راهنمای فارسی](README.fa.md) · [Benchmark — does it work?](BENCHMARK.md) · [Dashboard screenshot](https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/docs/dashboard.png)
 
 ip-relay sits between your AI apps and an API provider whose free tier is limited **per IP address**. Instead of hitting the limit after a few dozen requests, ip-relay routes each request through a rotating pool of proxies — so every request can come from a fresh IP, with its own fresh quota.
 
-![Dashboard](docs/dashboard.png)
+![Dashboard](https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/docs/dashboard.png)
 
 > ⚠️ **Please read this first**: this tool works around rate limits that providers set per IP. Check the upstream provider's terms of service before using it, and don't be a jerk with it. The maintainers are not responsible for how you use it.
 
@@ -157,20 +157,19 @@ All settings are editable from the dashboard, or via environment variables:
 
 Legacy aliases `OPENCODE_API_KEY` / `OPENCODE_BASE_URL` still work.
 
-## How the pool stays alive (v0.5+)
+## How the pool stays alive (v0.6+)
 
 Free proxies die fast and many public ones are already rate-limited by other
-users. v0.5 replaced the old "sweep 400 candidates every 10 min" design with:
+users. v0.6 introduced a highly resilient multi-tier proxy architecture:
 
-1. **A candidate reservoir** — thousands of `ip:port` entries pulled from 9
-   public lists (proxyscrape, TheSpeedX, monosans, proxifly, proxy-list.download,
-   geonode's uptime-ranked API).
+1. **A candidate reservoir** — thousands of SOCKS4/5 and HTTP/S `ip:port` entries pulled from 20+ public lists and custom Webshare API keys.
 2. **A continuous churner** — tests a small batch every few seconds:
    stage 1 = cheap TCP/HTTP check (6s, no upstream quota cost),
    stage 2 = real 1-token upstream request through the proxy.
-3. **Auto top-up** — when working lanes drop below `PROXY_POOL_TARGET`, the
-   churner keeps testing until the pool refills. Burned lanes are parked for
-   1h, dead ones retried after 10 min.
+3. **Scored lanes & latency ranking** — every lane carries an EWMA score and measured latency; requests are automatically routed to the fastest healthy lane.
+4. **Transparent request failover** — when a proxy lane fails mid-request, it is silently bypassed and retried on the next-best lane without the client ever detecting it.
+5. **Webshare key integration** — configure multiple Webshare API tokens via the dashboard UI or `.env` settings to automatically populate high-quality authenticated proxy lanes.
+6. **Auto top-up** — when working lanes drop below `PROXY_POOL_TARGET`, the churner keeps testing until the pool refills. Burned lanes are parked for cooldown, dead ones are removed automatically.
 
 First working lanes usually appear within 2–5 minutes of startup; the pool
 then keeps topping itself up. Watch it live on the dashboard's **Pool status**
