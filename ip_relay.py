@@ -47,7 +47,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 log = logging.getLogger("ip-relay")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S"
+)
 
 VERSION = "0.6.0"
 
@@ -225,7 +229,12 @@ class RingHandler(logging.Handler):
             pass
 
 
-logging.getLogger().addHandler(RingHandler())
+handler = RingHandler()
+handler.setFormatter(logging.Formatter(
+    fmt="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S"
+))
+logging.getLogger().addHandler(handler)
 
 app = FastAPI(title="ip-relay")
 
@@ -503,6 +512,16 @@ async def _probe_candidate(key: str) -> Lane | None:
     proto, addr = key.split("://", 1)
     proxy_url = f"{'http' if proto in ('http','https') else proto}://{addr}"
     try:
+        # Stage 1: Fast connectivity screening (max 4 seconds)
+        async with httpx.AsyncClient(proxy=proxy_url, timeout=4, verify=False) as c:
+            try:
+                r_screen = await c.get(_SCREEN_URL)
+                if r_screen.status_code not in (200, 204):
+                    return None
+            except Exception:
+                return None
+
+        # Stage 2: Full upstream completions check
         async with httpx.AsyncClient(proxy=proxy_url, timeout=PROBE_TIMEOUT, verify=False) as c:
             t0 = time.time()
             r = await c.post(

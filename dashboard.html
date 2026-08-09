@@ -1320,12 +1320,14 @@ function formatLogLine(line) {
   else if (line.includes('churn:') || line.includes('sources:')) color = '#38bdf8'; // Sky Blue
   else if (line.includes('burned') || line.includes('error') || line.includes('fail')) color = '#f87171'; // Red
 
-  const parts = line.split(' - ');
-  let timeStr = new Date().toLocaleTimeString();
+  const parts = line.split(' | ');
+  let timeStr = '';
   let msg = line;
-  if (parts.length >= 2) {
-    timeStr = parts[0].split(',')[0]; // strip millisecond details
-    msg = parts.slice(1).join(' - ');
+  if (parts.length >= 3) {
+    timeStr = parts[0];
+    msg = parts.slice(2).join(' | ');
+  } else {
+    timeStr = new Date().toLocaleTimeString();
   }
   return `<div class="log-entry"><span class="log-time">[${timeStr}]</span><span style="color: ${color};">${msg}</span></div>`;
 }
