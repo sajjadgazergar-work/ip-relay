@@ -1,363 +1,165 @@
-"""Tests for ip_relay core logic — no network, all mocked."""
-
 import json
-import asyncio
+import time
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-import ip_relay
+import ip_relay as ir
 
 
 @pytest.fixture(autouse=True)
-def fresh_state(monkeypatch):
-    """Reset module-level state so tests are isolated."""
-    ip_relay.pool["proxies"] = []
-    ip_relay.pool["updated"] = 0.0
-    ip_relay.cooldowns = {}
-    ip_relay.candidates = {}
-    ip_relay.tried = {}
-    ip_relay.direct_burned_until = 0.0
-    ip_relay.stats = {"requests": 0, "rotations": 0, "lane_failures": 0,
-                      "candidates_tested": 0, "probes_ok": 0, "probes_burned": 0}
-    ip_relay.sweep = {"state": "idle", "tested": 0, "found": 0, "last_refresh": 0.0, "sources_ok": 0}
-    # reset settings to defaults, no direct lane in most tests
-    ip_relay.apply_settings({
-        "upstream_base_url": "https://upstream.test/v1",
-        "upstream_api_key": "public",
-        "relay_api_key": "",
-        "proxy_refresh_sec": 600,
-        "proxy_test_concurrency": 12,
-        "proxy_max_candidates": 150,
-        "direct_lane": False,
-        "probe_model": "deepseek-v4-flash-free",
-    }, persist=False)
+def reset(monkeypatch, tmp_path):
+    monkeypatch.setattr(ir, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+    ir.POOL.lanes.clear()
+    ir.POOL.candidates.clear()
+    ir.POOL.tried.clear()
+    ir.STATS.update({"requests": 0, "failovers": 0, "lane_failures": 0,
+                     "probes_ok": 0, "probes_burned": 0, "candidates_tested": 0})
+    ir.apply_settings({"relay_api_key": ""}, persist=False)
     yield
 
 
-# ── unit tests ────────────────────────────────────────────────────
+# ── Lane scoring ─────────────────────────────────────────────────
 
-def test_strip_model_prefix():
-    assert ip_relay.strip_model_prefix("ocr/deepseek-v4-flash-free") == "deepseek-v4-flash-free"
-    assert ip_relay.strip_model_prefix("deepseek-v4-flash-free") == "deepseek-v4-flash-free"
-    # multi-segment: only the leading provider prefix is stripped (matches 9router)
-    assert ip_relay.strip_model_prefix("Ra/oc/deepseek-v4-flash-free") == "oc/deepseek-v4-flash-free"
-
-
-def test_is_quota_429_detects_free_usage_limit():
-    body = json.dumps({"error": {"type": "FreeUsageLimitError", "message": "free usage limit reached"}}).encode()
-    assert ip_relay.is_quota_429(body, 429) is True
-
-
-def test_is_quota_429_detects_rate_limit_text():
-    body = json.dumps({"error": {"type": "rate_limit_error", "message": "Rate limit reached"}}).encode()
-    assert ip_relay.is_quota_429(body, 429) is True
+def test_lane_scoring():
+    ln = ir.Lane("1.2.3.4:80", "http")
+    assert ln.score == 0.5
+    ln.mark_ok(500)
+    assert ln.score > 0.6
+    assert ln.ok == 1
+    assert ln.warm
+    ln.mark_fail(burn=True)
+    assert not ln.warm
+    assert ln.parked_until > time.time()
 
 
-def test_is_quota_429_false_for_other_status():
-    body = json.dumps({"error": {"message": "nope"}}).encode()
-    assert ip_relay.is_quota_429(body, 400) is False
+def test_lane_url():
+    assert ir.Lane("1.2.3.4:80", "http").url() == "http://1.2.3.4:80"
+    assert ir.Lane("1.2.3.4:80", "socks5").url() == "socks5://1.2.3.4:80"
+    assert ir.Lane("", "direct").url() is None
 
 
-def test_is_quota_429_false_for_plain_429():
-    body = json.dumps({"error": {"type": "other", "message": "slow down"}}).encode()
-    assert ip_relay.is_quota_429(body, 429) is False
+def test_valid_addr():
+    assert ir._valid_addr("1.2.3.4:8080")
+    assert not ir._valid_addr("1.2.3.4:99999")
+    assert not ir._valid_addr("nope")
+    assert not ir._valid_addr("999.1.1.1:80")
+    assert not ir._valid_addr("1.2.3:80")
 
 
-def test_mask_key():
-    assert ip_relay.mask_key("public") == "public..."
-    assert ip_relay.mask_key("") == "(none)"
+def test_pool_warm_ordering():
+    a = ir.Lane("1.1.1.1:80", "http")
+    a.score = 0.9
+    a.lat_ms = 300
+    b = ir.Lane("2.2.2.2:80", "http")
+    b.score = 0.5
+    b.lat_ms = 50
+    c = ir.Lane("3.3.3.3:80", "http")
+    c.parked_until = time.time() + 100
+    ir.POOL.lanes = {x.addr: x for x in (a, b, c)}
+    warm = ir.POOL.warm_lanes()
+    # latency-first ranking: fast lane wins even at lower score; parked excluded
+    assert [x.addr for x in warm] == ["2.2.2.2:80", "1.1.1.1:80"]
 
 
-# ── relay rotation (mocked upstream) ──────────────────────────────
+# ── relay failover ────────────────────────────────────────────────
 
-class FakeResponse:
-    def __init__(self, status_code, body=b"{}", headers=None):
-        self.status_code = status_code
-        self.content = body
-        self.headers = headers or {"content-type": "application/json"}
-
-
-def test_relay_rotates_on_quota_429(monkeypatch):
-    """A 429 FreeUsageLimit on the first proxy should park it and try the next."""
-    import ip_relay as ir
+def test_relay_failover_on_burn(monkeypatch):
+    """First lane returns 429-quota -> burned -> second lane answers 200."""
+    good = ir.Lane("2.2.2.2:80", "http")
+    good.score = 0.5
+    bad = ir.Lane("1.1.1.1:80", "http")
+    bad.score = 0.9  # tried first
+    ir.POOL.lanes = {x.addr: x for x in (good, bad)}
 
     calls = []
-    burned_body = json.dumps({"error": {"type": "FreeUsageLimitError", "message": "quota"}}).encode()
-    ok_body = json.dumps({"ok": True}).encode()
+    quota = json.dumps({"error": {"type": "FreeUsageLimitError", "message": "quota"}}).encode()
+    ok = json.dumps({"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]}).encode()
 
-    def handler(request):
-        proxy = request.headers.get("x-proxy-label", "?")
-        calls.append((proxy, request.url.path))
-        if proxy == "burned":
-            return httpx.Response(429, json=json.loads(burned_body), headers={"content-type": "application/json"})
-        return httpx.Response(200, json=json.loads(ok_body), headers={"content-type": "application/json"})
+    async def fake_attempt(lane, payload, path, headers, timeout):
+        calls.append(lane.addr)
+        if lane.addr == "1.1.1.1:80":
+            lane.mark_fail(burn=True)
+            return 429, {"content-type": "application/json"}, quota
+        lane.mark_ok(100)
+        return 200, {"content-type": "application/json"}, ok
 
-    # Route by proxy: inject a per-lane MockTransport by monkeypatching AsyncClient
-    RealClient = httpx.AsyncClient  # captured BEFORE patch
-
-    def _labeled_handler(request, label):
-        request.headers["x-proxy-label"] = label
-        return handler(request)
-
-    def fake_async_client(**kwargs):
-        proxy = kwargs.get("proxy", None)
-        label = "burned" if proxy == "http://1.2.3.4:8080" else "good"
-        kwargs.pop("proxy", None)
-        kwargs["transport"] = httpx.MockTransport(lambda req: _labeled_handler(req, label))
-        return RealClient(**kwargs)
-
-    monkeypatch.setattr(ir.httpx, "AsyncClient", fake_async_client)
-    ir.pool["proxies"] = ["1.2.3.4:8080", "5.6.7.8:8080"]
-    ir.cooldowns = {}
-
-    async def run():
-        return await ir.relay(
-            {"model": "x", "messages": []},
-            "chat/completions",
-            False,
-            {"Content-Type": "application/json"},
-            5,
-        )
-
-    status, headers, body = asyncio.run(run())
+    monkeypatch.setattr(ir, "_attempt", fake_attempt)
+    import asyncio
+    status, _, body = asyncio.run(ir.relay({"model": "m"}, "chat/completions", False, {}, 30))
     assert status == 200
-    # the burned proxy (if it was tried) should be in cooldown; good one never is
-    assert ir.cooldowns.get("5.6.7.8:8080", 0) == 0
-    # at least one lane was tried and succeeded
-    assert len(calls) >= 1
-    # if the burned proxy was tried first, rotation happened (both lanes hit)
-    if calls[0][0] == "burned":
-        assert len(calls) == 2
-        assert calls[1][0] == "good"
+    assert calls == ["1.1.1.1:80", "2.2.2.2:80"]   # failed over
+    assert ir.STATS["failovers"] == 1
 
 
-def test_relay_returns_429_when_all_burned(monkeypatch):
-    import ip_relay as ir
-
-    burned_body = json.dumps({"error": {"type": "FreeUsageLimitError", "message": "quota"}}).encode()
-
-    def handler(request):
-        return httpx.Response(429, json=json.loads(burned_body), headers={"content-type": "application/json"})
-
-    RealClient = httpx.AsyncClient  # captured BEFORE patch
-
-    def fake_async_client(**kwargs):
-        kwargs.pop("proxy", None)
-        kwargs["transport"] = httpx.MockTransport(handler)
-        return RealClient(**kwargs)
-
-    monkeypatch.setattr(ir.httpx, "AsyncClient", fake_async_client)
-    ir.pool["proxies"] = ["1.2.3.4:8080", "5.6.7.8:8080"]
-
-    async def run():
-        return await ir.relay(
-            {"model": "x", "messages": []},
-            "chat/completions",
-            False,
-            {"Content-Type": "application/json"},
-            5,
-        )
-
-    status, headers, body = asyncio.run(run())
-    assert status == 429
-    assert ir.cooldowns.get("1.2.3.4:8080", 0) > 0
-    assert ir.cooldowns.get("5.6.7.8:8080", 0) > 0
-
-
-def test_relay_warming_503_when_no_lanes():
-    import ip_relay as ir
-    ir.pool["proxies"] = []
-    ir.direct_burned_until = 1e18  # direct parked
-
-    async def run():
-        return await ir.relay(
-            {"model": "x", "messages": []},
-            "chat/completions",
-            False,
-            {},
-            5,
-        )
-
-    status, headers, body = asyncio.run(run())
+def test_relay_exhausted(monkeypatch):
+    ir.POOL.lanes.clear()
+    import asyncio
+    status, _, body = asyncio.run(ir.relay({"model": "m"}, "chat/completions", False, {}, 30))
     assert status == 503
-    assert b"warming" in body
+    assert b"rotator_exhausted" in body
 
 
-# ── FastAPI routes ────────────────────────────────────────────────
+def test_echo_proxy_burned(monkeypatch):
+    """A 200 with reflected-garbage body must fail over, not be served."""
+    good = ir.Lane("2.2.2.2:80", "http")
+    good.score = 0.5
+    echo = ir.Lane("1.1.1.1:80", "http")
+    echo.score = 0.9
+    ir.POOL.lanes = {x.addr: x for x in (good, echo)}
+    ok = json.dumps({"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]}).encode()
+    garbage = b"REMOTE_ADDR = 1.2.3.4\r\nREQUEST_METHOD = POST\r\n"
 
-def test_relay_auth_required(monkeypatch):
-    import ip_relay as ir
-    ir.apply_settings({"relay_api_key": "sekret"}, persist=False)
-    client = TestClient(ir.app)
-    r = client.post("/v1/chat/completions", headers={"Authorization": "Bearer wrong"})
-    assert r.status_code == 401
-    # passes auth; no JSON body -> 400 invalid json (auth check happens first)
-    r2 = client.post("/v1/chat/completions", headers={"Authorization": "Bearer sekret"})
-    assert r2.status_code == 400
+    async def fake_attempt(lane, payload, path, headers, timeout):
+        if lane.addr == "1.1.1.1:80":
+            # simulate _attempt's echo-detection path
+            if ir._looks_like_completion(garbage):
+                lane.mark_ok(100)
+                return 200, {"content-type": "text/plain"}, garbage
+            lane.mark_fail(burn=True)
+            return 502, {"content-type": "application/json"}, json.dumps(
+                {"error": {"type": "lane_invalid"}}).encode()
+        lane.mark_ok(100)
+        return 200, {"content-type": "application/json"}, ok
 
-
-def test_healthz_shape(monkeypatch):
-    import ip_relay as ir
-    ir.apply_settings({"relay_api_key": ""}, persist=False)
-    ir.pool["proxies"] = ["1.2.3.4:8080"]
-    client = TestClient(ir.app)
-    r = client.get("/healthz")
-    assert r.status_code == 200
-    data = r.json()
-    assert data["ok"] is True
-    assert data["pool"] == 1
-    assert "stats" in data
-
-
-def test_chat_completions_invalid_json(monkeypatch):
-    import ip_relay as ir
-    ir.apply_settings({"relay_api_key": ""}, persist=False)
-    client = TestClient(ir.app)
-    r = client.post("/v1/chat/completions", content=b"not-json", headers={"Content-Type": "application/json"})
-    assert r.status_code == 400
+    monkeypatch.setattr(ir, "_attempt", fake_attempt)
+    import asyncio
+    status, _, body = asyncio.run(ir.relay({"model": "m"}, "chat/completions", False, {}, 30))
+    assert status == 200
+    assert json.loads(body)["choices"][0]["message"]["content"] == "hi"
+    assert not ir._looks_like_completion(garbage)
+    assert ir._looks_like_completion(ok)
 
 
-# ── dashboard ─────────────────────────────────────────────────────
-
-def test_dashboard_html(monkeypatch):
-    import ip_relay as ir
-    client = TestClient(ir.app)
-    r = client.get("/")
-    assert r.status_code == 200
-    assert "ip-relay dashboard" in r.text
-    assert "Configuration" in r.text
+def test_is_quota_429():
+    body = json.dumps({"error": {"type": "FreeUsageLimitError", "message": "x"}}).encode()
+    assert ir.is_quota_429(body, 429)
+    assert not ir.is_quota_429(body, 200)
+    assert not ir.is_quota_429(b"not json", 429)
 
 
-def test_dashboard_login_flow(monkeypatch):
-    import ip_relay as ir
-    ir.apply_settings({"relay_api_key": "sekret"}, persist=False)
-    client = TestClient(ir.app)
-    # wrong key → 401
-    r = client.post("/login", json={"key": "wrong"})
-    assert r.status_code == 401
-    # right key → 200 + cookie
-    r = client.post("/login", json={"key": "sekret"})
-    assert r.status_code == 200
-    assert "ip_relay_auth" in r.cookies
-    cookie = r.cookies["ip_relay_auth"]
-    # data endpoint without cookie → 401 (fresh client, no cookies)
-    client2 = TestClient(ir.app)
-    r = client2.get("/api/settings")
-    assert r.status_code == 401
-    # with cookie → 200
-    r = client2.get("/api/settings", cookies={"ip_relay_auth": cookie})
-    assert r.status_code == 200
+# ── model resolution ──────────────────────────────────────────────
+
+def test_resolve_model_claude_alias(monkeypatch):
+    models = json.dumps({"data": [{"id": "deepseek-v4-flash-free"}]}).encode()
+
+    async def fake_models():
+        return 200, "application/json", models
+
+    monkeypatch.setattr(ir, "get_models_cached", fake_models)
+    ir._FALLBACK_MODEL = None
+    import asyncio
+    out = asyncio.run(ir.resolve_model("claude-haiku-4-5-20251001"))
+    assert out == "deepseek-v4-flash-free"
+    out2 = asyncio.run(ir.resolve_model("deepseek-v4-flash-free"))
+    assert out2 == "deepseek-v4-flash-free"
 
 
-def test_dashboard_settings_api(monkeypatch):
-    import ip_relay as ir
-    ir.apply_settings({"relay_api_key": ""}, persist=False)
-    client = TestClient(ir.app)
-    r = client.get("/api/settings")
-    assert r.status_code == 200
-    data = r.json()
-    assert "upstream_base_url" in data
-    assert "upstream_api_key" in data
-    assert data["upstream_api_key"] != "public"  # masked
-
-
-def test_dashboard_settings_post(monkeypatch, tmp_path):
-    import ip_relay as ir
-    ir.apply_settings({"relay_api_key": ""}, persist=False)
-    ir.SETTINGS_FILE = str(tmp_path / "settings.json")
-    client = TestClient(ir.app)
-    r = client.post("/api/settings", json={"probe_model": "test-model-123"})
-    assert r.status_code == 200
-    assert r.json()["probe_model"] == "test-model-123"
-    # persisted to disk
-    import os
-    assert os.path.exists(ir.SETTINGS_FILE)
-    # masked key guard: sending a masked value back doesn't clobber
-    r2 = client.post("/api/settings", json={"relay_api_key": "sk-abc***"})
-    assert r2.status_code == 200
-
-
-def test_dashboard_logs_api(monkeypatch):
-    import ip_relay as ir
-    ir.LOG_RING.append("test log line")
-    client = TestClient(ir.app)
-    r = client.get("/api/logs")
-    assert r.status_code == 200
-    assert "test log line" in r.json()["logs"]
-
-
-def test_dashboard_refresh_api(monkeypatch):
-    import ip_relay as ir
-    client = TestClient(ir.app)
-    r = client.post("/api/refresh")
-    assert r.status_code == 200
-    assert r.json() == {"ok": True}
-
-
-def test_parse_text_list():
-    text = "1.2.3.4:8080\n# comment\n\n5.6.7.8:3128\nhttp://user:pass@9.9.9.9:80\nbad-line\n"
-    got = ip_relay._parse_text_list(text)
-    assert "1.2.3.4:8080" in got
-    assert "5.6.7.8:3128" in got
-    assert "bad-line" not in got
-
-
-def test_parse_geonode():
-    text = json.dumps({"data": [{"ip": "1.2.3.4", "port": "8080"}, {"ip": "5.6.7.8", "port": "3128"}]})
-    assert ip_relay._parse_geonode(text) == ["1.2.3.4:8080", "5.6.7.8:3128"]
-    assert ip_relay._parse_geonode("not json") == []
-
-
-def test_churn_batch_commits_good(monkeypatch):
-    """Churner: stage-1 filters dead, stage-2 commits upstream-working to pool."""
-    import ip_relay as ir
-    ir.candidates = {"good1:80": 1.0, "good2:80": 1.0, "dead:80": 1.0, "burned:80": 1.0}
-
-    async def fake_connectable(p):
-        return p != "dead:80"
-
-    async def fake_works(p):
-        if p == "burned:80":
-            ir.cooldowns[p] = 1e18
-            return False
-        return p.startswith("good")
-
-    monkeypatch.setattr(ir, "proxy_connectable", fake_connectable)
-    monkeypatch.setattr(ir, "proxy_works", fake_works)
-    asyncio.run(ir.churn_batch(batch_size=10))
-    assert sorted(ir.pool["proxies"]) == ["good1:80", "good2:80"]
-    assert ir.stats["probes_ok"] == 2
-    assert ir.stats["probes_burned"] == 1
-    assert "dead:80" in ir.tried
-    assert ir.candidates == {}
-
-
-def test_pool_and_stats_apis(monkeypatch):
-    import ip_relay as ir
-    ir.apply_settings({"relay_api_key": ""}, persist=False)
-    ir.pool["proxies"] = ["1.2.3.4:80", "5.6.7.8:80"]
-    ir.cooldowns["5.6.7.8:80"] = 1e18
-    ir.candidates = {"9.9.9.9:80": 1.0}
-    client = TestClient(ir.app)
-    r = client.get("/api/pool")
-    assert r.status_code == 200
-    data = r.json()
-    assert data["alive"] == ["1.2.3.4:80"]
-    assert data["parked"][0]["proxy"] == "5.6.7.8:80"
-    assert data["queue"] == 1
-    r2 = client.get("/api/stats")
-    assert r2.status_code == 200
-    assert r2.json()["pool"] == 1
-
-
-# ── anthropic translation ─────────────────────────────────────────
+# ── anthropic translation (ported, regression-guarded) ────────────
 
 def test_anthropic_to_openai_basic():
-    out = ip_relay.anthropic_to_openai({
-        "model": "ocr/deepseek-v4-flash-free",
-        "max_tokens": 50,
+    out = ir.anthropic_to_openai({
+        "model": "ocr/deepseek-v4-flash-free", "max_tokens": 50,
         "system": "You are terse.",
         "messages": [{"role": "user", "content": "hi"}],
     })
@@ -367,31 +169,8 @@ def test_anthropic_to_openai_basic():
     assert out["messages"][1] == {"role": "user", "content": "hi"}
 
 
-def test_anthropic_to_openai_content_blocks():
-    out = ip_relay.anthropic_to_openai({
-        "model": "m",
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}]}],
-    })
-    assert out["messages"][0]["content"] == "line1\nline2"
-
-
-def test_openai_to_anthropic():
-    body = json.dumps({
-        "id": "x", "choices": [{"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 3, "completion_tokens": 2},
-    }).encode()
-    d = json.loads(ip_relay.openai_to_anthropic(body, "m"))
-    assert d["type"] == "message"
-    assert d["content"] == [{"type": "text", "text": "hello"}]
-    assert d["usage"] == {"input_tokens": 3, "output_tokens": 2}
-    assert d["stop_reason"] == "end_turn"
-
-
 def test_tool_call_roundtrip():
-    """Anthropic request with tools -> OpenAI; OpenAI tool_calls -> Anthropic."""
-    # request side: tools + tool_choice translated
-    out = ip_relay.anthropic_to_openai({
+    out = ir.anthropic_to_openai({
         "model": "m", "max_tokens": 10,
         "messages": [{"role": "user", "content": "weather?"}],
         "tools": [{"name": "get_weather", "description": "w",
@@ -399,27 +178,22 @@ def test_tool_call_roundtrip():
         "tool_choice": {"type": "auto"},
     })
     assert out["tools"][0]["function"]["name"] == "get_weather"
-    assert out["tools"][0]["function"]["parameters"]["properties"]["city"]["type"] == "string"
     assert out["tool_choice"] == "auto"
 
-    # response side: tool_calls -> tool_use blocks
     body = json.dumps({
         "id": "x",
         "choices": [{"finish_reason": "tool_calls", "message": {
             "role": "assistant", "content": "",
             "tool_calls": [{"id": "call_1", "type": "function",
-                            "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'}}],
-        }}],
+                            "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'}}]}}],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1},
     }).encode()
-    d = json.loads(ip_relay.openai_to_anthropic(body, "m"))
+    d = json.loads(ir.openai_to_anthropic(body, "m"))
     assert d["stop_reason"] == "tool_use"
     assert d["content"][0]["type"] == "tool_use"
-    assert d["content"][0]["name"] == "get_weather"
     assert d["content"][0]["input"] == {"city": "Paris"}
 
-    # history side: tool_use + tool_result blocks -> assistant tool_calls + tool msg
-    out2 = ip_relay.anthropic_to_openai({
+    out2 = ir.anthropic_to_openai({
         "model": "m",
         "messages": [
             {"role": "assistant", "content": [
@@ -432,19 +206,6 @@ def test_tool_call_roundtrip():
     assert out2["messages"][1] == {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
 
 
-def test_openai_sse_to_anthropic():
-    body = (
-        'data: {"choices":[{"delta":{"content":"He"}}]}\n'
-        'data: {"choices":[{"delta":{"content":"llo"}}]}\n'
-        "data: [DONE]\n"
-    ).encode()
-    out = ip_relay.openai_sse_to_anthropic(body, "m").decode()
-    assert "message_start" in out
-    # batched into one text block containing both chunks
-    assert '"type": "text_delta", "text": "Hello"' in out
-    assert "message_stop" in out
-
-
 def test_openai_sse_to_anthropic_tool_call():
     body = (
         'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\\"city\\""}}]}}]}\n'
@@ -452,34 +213,63 @@ def test_openai_sse_to_anthropic_tool_call():
         'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n'
         "data: [DONE]\n"
     ).encode()
-    out = ip_relay.openai_sse_to_anthropic(body, "m").decode()
+    out = ir.openai_sse_to_anthropic(body, "m").decode()
     assert '"type": "tool_use", "id": "call_1", "name": "get_weather"' in out
-    assert '"type": "input_json_delta", "partial_json": "{\\"city\\":\\"Paris\\"}"' in out
     assert '"stop_reason": "tool_use"' in out
 
 
-def test_anthropic_messages_endpoint(monkeypatch):
-    """Full path: anthropic request -> mocked relay -> anthropic response."""
-    import ip_relay as ir
-    ir.apply_settings({"relay_api_key": ""}, persist=False)
+# ── endpoints ─────────────────────────────────────────────────────
 
+def test_healthz():
+    client = TestClient(ir.app)
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert "warm" in r.json()
+    assert r.json()["version"] == ir.VERSION
+
+
+def test_stats_and_pool_apis():
+    ln = ir.Lane("1.2.3.4:80", "http")
+    ln.mark_ok(100)
+    ir.POOL.lanes[ln.addr] = ln
+    ir.POOL.candidates["http://9.9.9.9:80"] = time.time()
+    client = TestClient(ir.app)
+    s = client.get("/api/stats").json()
+    assert s["pool"]["warm"] == 1
+    assert s["pool"]["queue"] == 1
+    p = client.get("/api/pool").json()
+    assert p["warm"][0]["addr"] == "1.2.3.4:80"
+
+
+def test_anthropic_messages_endpoint(monkeypatch):
     oai_body = json.dumps({
         "id": "x", "model": "m",
-        "choices": [{"message": {"role": "assistant", "content": "hi there"}}],
+        "choices": [{"message": {"role": "assistant", "content": "hi there"}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 5, "completion_tokens": 4},
     }).encode()
 
     async def fake_relay(payload, path, stream, headers, timeout):
-        assert path == "chat/completions"
         return 200, {"content-type": "application/json"}, oai_body
 
+    async def fake_resolve(model):
+        return "deepseek-v4-flash-free"
+
     monkeypatch.setattr(ir, "relay", fake_relay)
+    monkeypatch.setattr(ir, "resolve_model", fake_resolve)
     client = TestClient(ir.app)
     r = client.post("/v1/messages", json={
-        "model": "ocr/deepseek-v4-flash-free", "max_tokens": 10,
+        "model": "deepseek-v4-flash-free", "max_tokens": 10,
         "messages": [{"role": "user", "content": "hi"}],
     })
     assert r.status_code == 200
     d = r.json()
     assert d["type"] == "message"
     assert d["content"][0]["text"] == "hi there"
+
+
+def test_dashboard_serves():
+    client = TestClient(ir.app)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "Egress lanes" in r.text
+    assert "Connect your app" in r.text

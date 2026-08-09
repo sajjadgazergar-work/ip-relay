@@ -72,6 +72,7 @@ if (Test-Path "$Dir\main.py")    { Copy-Item "$Dir\main.py"    "$Dir\main.py.bak
 # code
 Copy-Item "$src\ip_relay.py" $Dir -Force
 Copy-Item "$src\main.py"     $Dir -Force
+Copy-Item "$src\dashboard.html" $Dir -Force
 # env — never clobber existing
 if (-not (Test-Path "$Dir\.env")) {
   Copy-Item "$src\.env.example" "$Dir\.env" -Force

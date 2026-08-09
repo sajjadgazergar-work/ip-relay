@@ -81,7 +81,7 @@ fi
 [[ -f "$APP_DIR/main.py" ]] && cp "$APP_DIR/main.py" "$APP_DIR/main.py.bak" || true
 
 # code
-cp "$SRC/ip_relay.py" "$SRC/main.py" "$APP_DIR/"
+cp "$SRC/ip_relay.py" "$SRC/main.py" "$SRC/dashboard.html" "$APP_DIR/"
 # env — create only if missing (never clobber existing config)
 if [[ ! -f "$APP_DIR/.env" ]]; then
   cp "$SRC/.env.example" "$APP_DIR/.env"
