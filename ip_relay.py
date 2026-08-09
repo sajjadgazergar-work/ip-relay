@@ -284,6 +284,7 @@ class Pool:
     def __init__(self):
         self.lanes: dict[str, Lane] = {}      # addr -> Lane (confirmed)
         self.candidates: dict[str, float] = {}  # "proto://addr" -> first-seen
+        self.priority_candidates: dict[str, float] = {}  # "proto://addr" -> first-seen (priority)
         self.tried: dict[str, float] = {}     # candidate -> last-fail ts
         self.lock = asyncio.Lock()
         self.sources_ok = 0
@@ -306,7 +307,7 @@ class Pool:
         return {
             "warm": len(warm),
             "parked": len(self.parked_lanes()),
-            "queue": len(self.candidates),
+            "queue": len(self.candidates) + len(self.priority_candidates),
             "sources_ok": self.sources_ok,
             "best_latency_ms": warm[0].lat_ms if warm else None,
         }
@@ -468,9 +469,9 @@ async def _fetch_sources() -> None:
                         else:
                             addr = f"{ip}:{port}"
                         key = f"http://{addr}"
-                        if ip in POOL.lanes or addr in POOL.lanes or key in POOL.candidates:
+                        if ip in POOL.lanes or addr in POOL.lanes or key in POOL.candidates or key in POOL.priority_candidates:
                             continue
-                        POOL.candidates[key] = now
+                        POOL.priority_candidates[key] = now
                         added += 1
                 except Exception:
                     pass
@@ -536,11 +537,27 @@ async def _probe_candidate(key: str) -> Lane | None:
 
 async def _churn_batch() -> None:
     """Test a batch of candidates, promoting the good into the pool."""
-    if not POOL.candidates:
+    if not POOL.candidates and not POOL.priority_candidates:
         return
-    batch = list(POOL.candidates.keys())[: TEST_CONCURRENCY * 8]
-    for k in batch:
+    
+    batch_size = TEST_CONCURRENCY * 8
+    batch = []
+    
+    # 1. Pop from priority queue first
+    while POOL.priority_candidates and len(batch) < batch_size:
+        k = next(iter(POOL.priority_candidates.keys()))
+        POOL.priority_candidates.pop(k, None)
+        batch.append(k)
+        
+    # 2. Fill remainder from standard queue
+    while POOL.candidates and len(batch) < batch_size:
+        k = next(iter(POOL.candidates.keys()))
         POOL.candidates.pop(k, None)
+        batch.append(k)
+        
+    if not batch:
+        return
+        
     STATS["candidates_tested"] += len(batch)
     log.info("Prober: Testing %d candidate proxies (concurrency=%d)...", len(batch), TEST_CONCURRENCY)
     sem = asyncio.Semaphore(TEST_CONCURRENCY)

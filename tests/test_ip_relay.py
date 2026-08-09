@@ -12,6 +12,7 @@ def reset(monkeypatch, tmp_path):
     monkeypatch.setattr(ir, "SETTINGS_FILE", str(tmp_path / "settings.json"))
     ir.POOL.lanes.clear()
     ir.POOL.candidates.clear()
+    ir.POOL.priority_candidates.clear()
     ir.POOL.tried.clear()
     ir.STATS.update({"requests": 0, "failovers": 0, "lane_failures": 0,
                      "probes_ok": 0, "probes_burned": 0, "candidates_tested": 0})
