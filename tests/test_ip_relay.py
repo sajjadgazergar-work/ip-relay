@@ -350,3 +350,78 @@ def test_pool_and_stats_apis(monkeypatch):
     r2 = client.get("/api/stats")
     assert r2.status_code == 200
     assert r2.json()["pool"] == 1
+
+
+# ── anthropic translation ─────────────────────────────────────────
+
+def test_anthropic_to_openai_basic():
+    out = ip_relay.anthropic_to_openai({
+        "model": "ocr/deepseek-v4-flash-free",
+        "max_tokens": 50,
+        "system": "You are terse.",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert out["model"] == "deepseek-v4-flash-free"
+    assert out["max_tokens"] == 50
+    assert out["messages"][0] == {"role": "system", "content": "You are terse."}
+    assert out["messages"][1] == {"role": "user", "content": "hi"}
+
+
+def test_anthropic_to_openai_content_blocks():
+    out = ip_relay.anthropic_to_openai({
+        "model": "m",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}]}],
+    })
+    assert out["messages"][0]["content"] == "line1\nline2"
+
+
+def test_openai_to_anthropic():
+    body = json.dumps({
+        "id": "x", "choices": [{"message": {"role": "assistant", "content": "hello"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+    }).encode()
+    d = json.loads(ip_relay.openai_to_anthropic(body, "m"))
+    assert d["type"] == "message"
+    assert d["content"] == [{"type": "text", "text": "hello"}]
+    assert d["usage"] == {"input_tokens": 3, "output_tokens": 2}
+
+
+def test_openai_sse_to_anthropic():
+    body = (
+        'data: {"choices":[{"delta":{"content":"He"}}]}\n'
+        'data: {"choices":[{"delta":{"content":"llo"}}]}\n'
+        "data: [DONE]\n"
+    ).encode()
+    out = ip_relay.openai_sse_to_anthropic(body, "m").decode()
+    assert "message_start" in out
+    assert out.count('"type": "content_block_delta"') == 2
+    assert '"text": "He"' in out
+    assert "message_stop" in out
+
+
+def test_anthropic_messages_endpoint(monkeypatch):
+    """Full path: anthropic request -> mocked relay -> anthropic response."""
+    import ip_relay as ir
+    ir.apply_settings({"relay_api_key": ""}, persist=False)
+
+    oai_body = json.dumps({
+        "id": "x", "model": "m",
+        "choices": [{"message": {"role": "assistant", "content": "hi there"}}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 4},
+    }).encode()
+
+    async def fake_relay(payload, path, stream, headers, timeout):
+        assert path == "chat/completions"
+        return 200, {"content-type": "application/json"}, oai_body
+
+    monkeypatch.setattr(ir, "relay", fake_relay)
+    client = TestClient(ir.app)
+    r = client.post("/v1/messages", json={
+        "model": "ocr/deepseek-v4-flash-free", "max_tokens": 10,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 200
+    d = r.json()
+    assert d["type"] == "message"
+    assert d["content"][0]["text"] == "hi there"

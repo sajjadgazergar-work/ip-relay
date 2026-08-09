@@ -667,6 +667,126 @@ async def chat_completions(request: Request):
     return Response(content=body, status_code=status, media_type=resp_headers.get("content-type", "application/json"))
 
 
+# ── Anthropic (/v1/messages) support ─────────────────────────────
+# Claude Code and other Anthropic-native clients POST to /v1/messages with
+# the Anthropic message schema, not OpenAI's. The upstream (opencode zen) is
+# OpenAI-compatible, so we translate: Anthropic request -> OpenAI request ->
+# relay -> OpenAI response -> Anthropic response. Non-streaming returns the
+# full Anthropic message object; streaming emits Anthropic SSE events.
+
+def anthropic_to_openai(payload: dict) -> dict:
+    """Convert an Anthropic /v1/messages request into an OpenAI chat request."""
+    msgs: list[dict] = []
+    system = payload.get("system")
+    if system:
+        text = system if isinstance(system, str) else " ".join(
+            b.get("text", "") for b in system if isinstance(b, dict))
+        if text.strip():
+            msgs.append({"role": "system", "content": text})
+    for m in payload.get("messages", []):
+        content = m.get("content")
+        if isinstance(content, list):  # anthropic content blocks -> plain text
+            content = "\n".join(
+                b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+        msgs.append({"role": m.get("role", "user"), "content": content})
+    out = {
+        "model": strip_model_prefix(str(payload.get("model", ""))),
+        "messages": msgs,
+        "stream": bool(payload.get("stream", False)),
+    }
+    if payload.get("max_tokens"):
+        out["max_tokens"] = payload["max_tokens"]
+    if payload.get("temperature") is not None:
+        out["temperature"] = payload["temperature"]
+    if payload.get("top_p") is not None:
+        out["top_p"] = payload["top_p"]
+    return out
+
+
+def openai_to_anthropic(body: bytes, model: str) -> bytes:
+    """Convert a (buffered) OpenAI chat completion into an Anthropic message."""
+    try:
+        d = json.loads(body)
+        ch = d["choices"][0]["message"]
+        text = ch.get("content") or ch.get("reasoning_content") or ""
+        usage = d.get("usage", {})
+        return json.dumps({
+            "id": d.get("id", "msg_" + uuid.uuid4().hex[:24]),
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            },
+        }).encode()
+    except Exception:
+        return body
+
+
+def openai_sse_to_anthropic(body: bytes, model: str) -> bytes:
+    """Convert buffered OpenAI SSE chunks into Anthropic SSE events."""
+    out: list[str] = []
+    msg_id = "msg_" + uuid.uuid4().hex[:24]
+    out.append(f"event: message_start\ndata: {json.dumps({'type':'message_start','message':{'id':msg_id,'type':'message','role':'assistant','model':model,'content':[],'stop_reason':None,'usage':{'input_tokens':0,'output_tokens':0}}})}\n")
+    out.append(f"event: content_block_start\ndata: {json.dumps({'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}})}\n")
+    for raw in body.decode("utf-8", "ignore").splitlines():
+        if not raw.startswith("data:"):
+            continue
+        data = raw[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            c = json.loads(data)
+            delta = c["choices"][0].get("delta", {})
+            piece = delta.get("content") or delta.get("reasoning_content")
+            if piece:
+                out.append(f"event: content_block_delta\ndata: {json.dumps({'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':piece}})}\n")
+        except Exception:
+            continue
+    out.append(f"event: content_block_stop\ndata: {json.dumps({'type':'content_block_stop','index':0})}\n")
+    out.append(f"event: message_delta\ndata: {json.dumps({'type':'message_delta','delta':{'stop_reason':'end_turn'},'usage':{'output_tokens':0}})}\n")
+    out.append("event: message_stop\ndata: {\"type\":\"message_stop\"}\n")
+    return "\n".join(out).encode()
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(request: Request):
+    """Anthropic-native endpoint so Claude Code (and other Anthropic clients)
+    can use the relay directly. Translates to the upstream OpenAI format."""
+    auth = request.headers.get("authorization") or request.headers.get("x-api-key", "")
+    if RELAY_API_KEY and auth not in (f"Bearer {RELAY_API_KEY}", RELAY_API_KEY):
+        return JSONResponse({"type": "error", "error": {"type": "authentication_error", "message": "invalid relay key"}}, status_code=401)
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"type": "error", "error": {"type": "invalid_request_error", "message": "invalid json"}}, status_code=400)
+
+    stats["requests"] += 1
+    model = strip_model_prefix(str(payload.get("model", "")))
+    oai = anthropic_to_openai(payload)
+    stream = oai["stream"]
+    headers = build_upstream_headers(request.headers.get("authorization"), request)
+    timeout = 300.0 if stream else 120.0
+
+    status, resp_headers, body = await relay(oai, "chat/completions", stream, headers, timeout)
+    if status >= 300:
+        # translate upstream error into Anthropic error shape
+        try:
+            e = json.loads(body).get("error", {})
+            msg = e.get("message", "upstream error")
+        except Exception:
+            msg = "upstream error"
+        etype = "rate_limit_error" if status == 429 else "api_error"
+        return JSONResponse({"type": "error", "error": {"type": etype, "message": msg}}, status_code=status)
+
+    if stream:
+        return StreamingResponse(iter([openai_sse_to_anthropic(body, model)]), media_type="text/event-stream")
+    return Response(content=openai_to_anthropic(body, model), media_type="application/json")
+
+
 # ── dashboard UI ──────────────────────────────────────────────────
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -1112,7 +1232,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
       <div class="guide-block">
         <h3>🤖 Claude Code</h3>
-        <pre class="code-block" id="codeClaude"># ~/.claude/settings.json
+        <pre class="code-block" id="codeClaude"># ip-relay speaks Anthropic natively at /v1/messages —
+# point Claude Code straight at it:
+# ~/.claude/settings.json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "BASE",
