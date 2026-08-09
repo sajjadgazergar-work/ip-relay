@@ -439,6 +439,70 @@ def strip_model_prefix(model: str) -> str:
     return model.split("/", 1)[-1]
 
 
+# Claude Code (and other Anthropic clients) silently call their three internal
+# tiers — haiku/sonnet/opus — with full Anthropic model IDs for background
+# tasks, even when the user picked a different primary model. Those IDs don't
+# exist on the upstream, so the relay would 404 and Claude Code reports the
+# misleading "model may not exist". Map any such alias to the configured model.
+#
+# We resolve the fallback lazily from the upstream's free model list so it
+# tracks whatever is actually available; deepseek-v4-flash-free is the default.
+_FALLBACK_MODEL: str | None = None
+_FALLBACK_MODEL_AT: float = 0.0
+FALLBACK_MODEL_SEC = 300
+
+
+async def fallback_model() -> str:
+    """The model to substitute when a client asks for an unknown/claude-* name.
+
+    Picks the first free model from the upstream's /models list (cached); falls
+    back to deepseek-v4-flash-free if the list can't be fetched."""
+    global _FALLBACK_MODEL, _FALLBACK_MODEL_AT
+    if _FALLBACK_MODEL and time.time() - _FALLBACK_MODEL_AT < FALLBACK_MODEL_SEC:
+        return _FALLBACK_MODEL
+    chosen = "deepseek-v4-flash-free"
+    try:
+        status, _, body = await get_models_cached()
+        if status == 200:
+            data = json.loads(body)
+            ids = [m.get("id", "") for m in data.get("data", [])]
+            free = [i for i in ids if i.endswith("-free")]
+            if free:
+                # prefer the flash deepseek, else first free model
+                chosen = next((i for i in free if "deepseek" in i), free[0])
+    except Exception:
+        pass
+    _FALLBACK_MODEL = chosen
+    _FALLBACK_MODEL_AT = time.time()
+    return chosen
+
+
+# names that mean "Claude Code's internal tier, not a real upstream model"
+_CLAUDE_TIER_HINTS = ("claude-", "haiku", "sonnet", "opus")
+
+
+async def resolve_model(model: str) -> str:
+    """Map a client-requested model to one the upstream actually serves.
+
+    - known upstream names pass through unchanged
+    - claude-*/haiku/sonnet/opus aliases (Claude Code background tiers) get
+      mapped to the fallback free model so background calls stop 404ing
+    - anything else unknown also maps to the fallback (better than a 404)"""
+    name = strip_model_prefix(model)
+    try:
+        status, _, body = await get_models_cached()
+        if status == 200:
+            ids = {m.get("id", "") for m in json.loads(body).get("data", [])}
+            if name in ids:
+                return name
+    except Exception:
+        pass
+    if any(h in name for h in _CLAUDE_TIER_HINTS):
+        return await fallback_model()
+    # unknown name — substitute rather than 404 so the client still works
+    return await fallback_model()
+
+
 def is_quota_429(body: bytes, status: int) -> bool:
     if status != 429:
         return False
@@ -650,7 +714,7 @@ async def chat_completions(request: Request):
         return JSONResponse({"error": {"message": "invalid json", "type": "invalid_request"}}, status_code=400)
 
     stats["requests"] += 1
-    model = strip_model_prefix(str(payload.get("model", "")))
+    model = await resolve_model(str(payload.get("model", "")))
     payload["model"] = model
     stream = bool(payload.get("stream", False))
     auth = request.headers.get("authorization")
@@ -938,7 +1002,8 @@ async def anthropic_messages(request: Request):
         return JSONResponse({"type": "error", "error": {"type": "invalid_request_error", "message": "invalid json"}}, status_code=400)
 
     stats["requests"] += 1
-    model = strip_model_prefix(str(payload.get("model", "")))
+    model = await resolve_model(str(payload.get("model", "")))
+    payload["model"] = model
     oai = anthropic_to_openai(payload)
     stream = oai["stream"]
     headers = build_upstream_headers(request.headers.get("authorization"), request)
