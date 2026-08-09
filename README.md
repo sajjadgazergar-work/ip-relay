@@ -23,6 +23,7 @@ ip-relay sits between your AI apps and an API provider whose free tier is limite
 - ✅ **Zero-config default**: works out of the box against opencode's free tier (just run it)
 - ✅ **Rotates egress IPs automatically** when the quota error appears
 - ✅ **OpenAI-compatible**: drop-in for any OpenAI client, gateway, or aggregator
+- ✅ **Anthropic-compatible**: `/v1/messages` endpoint for Claude Code & Anthropic SDKs (auto-translated)
 - ✅ **Streaming**: full SSE pass-through for chat completions
 - ✅ **Web dashboard**: status, live stats, live logs, and settings — no tech knowledge needed
 - ✅ **Settings persist** across restarts (via `settings.json` / the dashboard)
