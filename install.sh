@@ -46,25 +46,25 @@ if [[ "$MODE" == "auto" ]]; then
   MODE="install"
 fi
 
-# ── fetch the release ────────────────────────────────────────────
+# ── fetch the source ─────────────────────────────────────────────
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-log "Fetching ${REPO}@${TAG}..."
-curl -fsSL "https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz" -o "$TMP/relay.tar.gz" \
-  || die "download failed — check network / tag"
+log "Fetching ${REPO}@${BRANCH}..."
+curl -fsSL "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" -o "$TMP/relay.tar.gz" \
+  || die "download failed — check network / branch"
 tar -xzf "$TMP/relay.tar.gz" -C "$TMP"
-SRC="$TMP/ip-relay-${TAG#v}"
+SRC="$TMP/ip-relay-${BRANCH}"
 
 # ── docker mode ──────────────────────────────────────────────────
 if [[ "$MODE" == "docker" ]]; then
-  log "Building Docker image ip-relay:${TAG}..."
-  docker build -t "ip-relay:${TAG}" "$SRC"
+  log "Building Docker image ip-relay:${BRANCH}..."
+  docker build -t "ip-relay:${BRANCH}" "$SRC"
   log "Running container (port 8080 → 8080)..."
   docker rm -f ip-relay >/dev/null 2>&1 || true
   docker run -d --name ip-relay --restart unless-stopped \
     -p 8080:8080 -e PORT=8080 \
     -v "${APP_DIR}:/data" \
-    "ip-relay:${TAG}"
+    "ip-relay:${BRANCH}"
   sleep 2
   curl -s http://127.0.0.1:8080/healthz && echo && log "Done. Dashboard: http://<server>:8080"
   exit 0

@@ -17,8 +17,10 @@ param(
   [switch]$Docker
 )
 $ErrorActionPreference = 'Stop'
-$Repo = 'sajjadgazergar-work/ip-relay'
-$Tag  = 'v0.5.0'
+$Repo   = 'sajjadgazergar-work/ip-relay'
+# Track the default branch, not a frozen release tag — a pinned tag is how this
+# shipped stale code (the README command pulls main, so the installer must too).
+$Branch = 'main'
 
 function Log([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Die([string]$m) { Write-Host "ERROR: $m" -ForegroundColor Red; exit 1 }
@@ -38,22 +40,23 @@ if ($Docker) {
   if ($ver -ne '3') { Die "Python 3 required (found: $ver)" }
 }
 
-# ── fetch release ──────────────────────────────────────
-Log "Fetching $Repo@$Tag ..."
-$zip = Join-Path $env:TEMP "ip-relay-$Tag.zip"
-$dest = Join-Path $env:TEMP "ip-relay-$($Tag.TrimStart('v'))"
+# ── fetch source ───────────────────────────────────────
+Log "Fetching $Repo@$Branch ..."
+$zip  = Join-Path $env:TEMP "ip-relay-$Branch.zip"
+$dest = Join-Path $env:TEMP "ip-relay-$Branch"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Invoke-WebRequest -Uri "https://github.com/$Repo/archive/refs/tags/$Tag.zip" -OutFile $zip
+Invoke-WebRequest -Uri "https://github.com/$Repo/archive/refs/heads/$Branch.zip" -OutFile $zip
+if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
 Expand-Archive -Path $zip -DestinationPath $env:TEMP -Force
 $src = $dest
 
 # ── docker mode ─────────────────────────────────────────
 if ($Docker) {
   Log 'Building Docker image ...'
-  docker build -t "ip-relay:$Tag" $src
+  docker build -t "ip-relay:$Branch" $src
   Log 'Running container (port 8080)...'
   docker rm -f ip-relay *> $null
-  docker run -d --name ip-relay --restart unless-stopped -p 8080:8080 -e PORT=8080 "ip-relay:$Tag"
+  docker run -d --name ip-relay --restart unless-stopped -p 8080:8080 -e PORT=8080 "ip-relay:$Branch"
   Log "Done. Dashboard: http://localhost:8080"
   exit 0
 }

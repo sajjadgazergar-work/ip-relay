@@ -37,6 +37,8 @@ ip-relay sits between your AI apps and an API provider whose free tier is limite
 curl -sL https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.sh | bash
 ```
 
+> Always installs the **latest** code from `main` (no frozen release tag). Re-running the same command updates an existing install in place.
+
 That's it. The script:
 - Installs into `/opt/ip-relay` (fresh) **or** updates an existing install automatically
 - Creates a Python venv, installs deps, sets up a systemd service that auto-starts
@@ -70,6 +72,8 @@ Or all-in-one:
 ```powershell
 iex (irm https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/install.ps1)
 ```
+
+> Always pulls the **latest** code from `main`. Re-run the same command to update.
 
 The script installs into `%LOCALAPPDATA%\ip-relay`, creates a venv, installs deps, and leaves you a **`start-ip-relay.bat`** you can double-click to run. Flags: `-Dir D:\ip-relay`, `-Manual` (no launcher), `-Docker`.
 
