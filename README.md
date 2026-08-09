@@ -140,14 +140,36 @@ All settings are editable from the dashboard, or via environment variables:
 | `UPSTREAM_BASE_URL` | `https://opencode.ai/zen/v1` | Upstream OpenAI-compatible API |
 | `UPSTREAM_API_KEY` | `public` | Key sent upstream (opencode free tier uses `public`) |
 | `RELAY_API_KEY` | *(empty)* | Optional — protect your relay & dashboard with a key |
-| `PROXY_REFRESH_SEC` | `600` | How often to refresh the proxy pool (seconds) |
-| `PROXY_TEST_CONCURRENCY` | `12` | Proxies tested in parallel during refresh |
-| `PROXY_MAX_CANDIDATES` | `150` | Max candidates scanned per refresh |
+| `PROXY_REFRESH_SEC` | `600` | How often to re-pull the public proxy lists (seconds) |
+| `PROXY_TEST_CONCURRENCY` | `25` | Proxies tested in parallel |
+| `PROXY_MAX_CANDIDATES` | `2000` | Max untested candidates held in the reservoir |
+| `PROXY_POOL_TARGET` | `25` | Working lanes the churner tries to maintain |
+| `PROBE_TIMEOUT` | `20` | Timeout (s) for the real upstream probe |
 | `DIRECT_LANE` | `1` | Allow direct (your server IP) egress |
 | `PROBE_MODEL` | `deepseek-v4-flash-free` | Model used to test proxies |
+| `ALLOW_SOCKS` | *(off)* | Also fetch protocol:// lists (needs `httpx[socks]`) |
 | `PORT` | `8080` | Listen port |
 
 Legacy aliases `OPENCODE_API_KEY` / `OPENCODE_BASE_URL` still work.
+
+## How the pool stays alive (v0.5+)
+
+Free proxies die fast and many public ones are already rate-limited by other
+users. v0.5 replaced the old "sweep 400 candidates every 10 min" design with:
+
+1. **A candidate reservoir** — thousands of `ip:port` entries pulled from 9
+   public lists (proxyscrape, TheSpeedX, monosans, proxifly, proxy-list.download,
+   geonode's uptime-ranked API).
+2. **A continuous churner** — tests a small batch every few seconds:
+   stage 1 = cheap TCP/HTTP check (6s, no upstream quota cost),
+   stage 2 = real 1-token upstream request through the proxy.
+3. **Auto top-up** — when working lanes drop below `PROXY_POOL_TARGET`, the
+   churner keeps testing until the pool refills. Burned lanes are parked for
+   1h, dead ones retried after 10 min.
+
+First working lanes usually appear within 2–5 minutes of startup; the pool
+then keeps topping itself up. Watch it live on the dashboard's **Pool status**
+panel.
 
 ## How it works
 

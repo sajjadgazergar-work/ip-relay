@@ -45,10 +45,12 @@ DEFAULTS = {
     "upstream_api_key": "public",
     "relay_api_key": "",
     "proxy_refresh_sec": 600,
-    "proxy_test_concurrency": 20,
-    "proxy_max_candidates": 400,
+    "proxy_test_concurrency": 25,
+    "proxy_max_candidates": 2000,
     "proxy_min_pool": 10,
+    "proxy_pool_target": 25,
     "relay_proxy_timeout": 25,
+    "probe_timeout": 20,
     "direct_lane": True,
     "probe_model": "deepseek-v4-flash-free",
 }
@@ -66,7 +68,9 @@ def load_settings() -> None:
         "proxy_test_concurrency": int(os.environ.get("PROXY_TEST_CONCURRENCY", str(DEFAULTS["proxy_test_concurrency"]))),
         "proxy_max_candidates": int(os.environ.get("PROXY_MAX_CANDIDATES", str(DEFAULTS["proxy_max_candidates"]))),
         "proxy_min_pool": int(os.environ.get("PROXY_MIN_POOL", str(DEFAULTS["proxy_min_pool"]))),
+        "proxy_pool_target": int(os.environ.get("PROXY_POOL_TARGET", str(DEFAULTS["proxy_pool_target"]))),
         "relay_proxy_timeout": int(os.environ.get("RELAY_PROXY_TIMEOUT", str(DEFAULTS["relay_proxy_timeout"]))),
+        "probe_timeout": int(os.environ.get("PROBE_TIMEOUT", str(DEFAULTS["probe_timeout"]))),
         "direct_lane": os.environ.get("DIRECT_LANE", "1") in ("1", "true", "yes"),
         "probe_model": os.environ.get("PROBE_MODEL", DEFAULTS["probe_model"]),
     }
@@ -91,7 +95,8 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     """Update runtime config from the UI/dashboard and sync module globals."""
     global UPSTREAM_API_KEY, UPSTREAM_BASE_URL, RELAY_API_KEY
     global PROXY_REFRESH_SEC, PROXY_TEST_CONCURRENCY, PROXY_MAX_CANDIDATES
-    global PROXY_MIN_POOL, RELAY_PROXY_TIMEOUT, DIRECT_LANE, UPSTREAM_PROBE
+    global PROXY_MIN_POOL, PROXY_POOL_TARGET, RELAY_PROXY_TIMEOUT, PROBE_TIMEOUT
+    global DIRECT_LANE, UPSTREAM_PROBE
     for k, v in new.items():
         if k in DEFAULTS:
             settings[k] = v
@@ -102,7 +107,9 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     PROXY_TEST_CONCURRENCY = max(1, int(settings["proxy_test_concurrency"]))
     PROXY_MAX_CANDIDATES = max(5, int(settings["proxy_max_candidates"]))
     PROXY_MIN_POOL = int(settings.get("proxy_min_pool", 10))
+    PROXY_POOL_TARGET = max(PROXY_MIN_POOL, int(settings.get("proxy_pool_target", 25)))
     RELAY_PROXY_TIMEOUT = max(5, int(settings.get("relay_proxy_timeout", 25)))
+    PROBE_TIMEOUT = max(5, int(settings.get("probe_timeout", 20)))
     DIRECT_LANE = bool(settings["direct_lane"])
     UPSTREAM_PROBE = {
         "model": settings["probe_model"],
@@ -140,21 +147,43 @@ class RingHandler(logging.Handler):
 logging.getLogger().addHandler(RingHandler())
 
 PROXY_LIST_URLS = [
+    # plain-text ip:port lists (HTTP/HTTPS proxies)
     "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text&timeout=5000",
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+    "https://www.proxy-list.download/api/v1/get?type=http",
+    "https://www.proxy-list.download/api/v1/get?type=https",
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/https/data.txt",
+    # uptime-ranked JSON API — sorted by last-checked + uptime, best candidates first
+    "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps",
+    "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=upTime&sort_type=desc&protocols=http%2Chttps",
+]
+
+# protocol://ip:port lists (proxyscrape v3); http/https entries are used,
+# socks entries need httpx[socks] + ALLOW_SOCKS=1
+PROTOCOL_LIST_URLS = [
+    "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&proxy_format=protocolipport&format=text",
 ]
 
 app = FastAPI(title="ip-relay")
 
 # ── proxy pool state ──────────────────────────────────────────────
 pool = {"proxies": [], "updated": 0.0, "lock": asyncio.Lock()}
+# candidate reservoir — the pool is fed from here by a continuous churner,
+# because free-proxy lists are thousands of entries long and most are dead
+# or already rate-limited. A one-shot sweep of a capped subset was the old
+# design; it starved whenever the first N candidates happened to be bad.
+candidates: dict[str, float] = {}          # proxy -> first-seen ts (untested)
+tried: dict[str, float] = {}               # proxy -> last-try ts (failed probes)
 # proxy -> cooldown_until (burned IPs get parked for a while)
 cooldowns: dict[str, float] = {}
 # set when the direct egress itself hits the quota limit
 direct_burned_until = 0.0
 # counters for observability
-stats = {"requests": 0, "rotations": 0, "lane_failures": 0}
+stats = {"requests": 0, "rotations": 0, "lane_failures": 0,
+         "candidates_tested": 0, "probes_ok": 0, "probes_burned": 0}
+sweep = {"state": "idle", "tested": 0, "found": 0, "last_refresh": 0.0, "sources_ok": 0}
 
 
 def mask_key(k: str) -> str:
@@ -163,39 +192,87 @@ def mask_key(k: str) -> str:
 
 # ── proxy pool ────────────────────────────────────────────────────
 
+def _parse_text_list(text: str) -> list[str]:
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "://" in line:
+            continue
+        parts = line.split(":")
+        if len(parts) >= 2:
+            try:
+                int(parts[1])
+            except ValueError:
+                continue
+            proxy = f"{parts[0]}:{parts[1]}"
+            if len(parts) >= 4:
+                proxy = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+            out.append(proxy)
+    return out
+
+
+def _parse_geonode(text: str) -> list[str]:
+    try:
+        data = json.loads(text)
+        out = []
+        for it in data.get("data", []):
+            ip, port = it.get("ip"), it.get("port")
+            if ip and port:
+                out.append(f"{ip}:{port}")
+        return out
+    except Exception:
+        return []
+
+
 async def fetch_proxy_candidates() -> list[str]:
     seen: dict[str, str] = {}
+    ok_sources = 0
     async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
         for url in PROXY_LIST_URLS:
             try:
-                r = await client.get(url)
+                headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36"} if "geonode" in url else {}
+                r = await client.get(url, headers=headers)
                 if r.status_code != 200:
                     continue
-                for line in r.text.splitlines():
-                    line = line.strip()
-                    if not line or "://" in line:
-                        continue
-                    parts = line.split(":")
-                    if len(parts) >= 2:
-                        try:
-                            int(parts[1])
-                        except ValueError:
-                            continue
-                        proxy = f"{parts[0]}:{parts[1]}"
-                        if len(parts) >= 4:
-                            proxy = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
-                        seen[proxy] = url
+                found = _parse_geonode(r.text) if "geonode" in url else _parse_text_list(r.text)
+                if found:
+                    ok_sources += 1
+                for proxy in found:
+                    seen[proxy] = url
             except Exception:
                 continue
+        if os.environ.get("ALLOW_SOCKS", "") in ("1", "true", "yes"):
+            for url in PROTOCOL_LIST_URLS:
+                try:
+                    r = await client.get(url)
+                    if r.status_code != 200:
+                        continue
+                    for line in r.text.splitlines():
+                        line = line.strip()
+                        if line.startswith(("http://", "https://")):
+                            seen[line.split("://", 1)[1]] = url
+                except Exception:
+                    continue
+    sweep["sources_ok"] = ok_sources
     return list(seen.keys())
 
 
-async def proxy_works(proxy: str) -> bool:
-    """Real test: can we complete a 1-token upstream free request through it?
-    Proves (a) proxy is alive and (b) its IP is not burned — exactly what the
-    relay needs."""
+async def proxy_connectable(proxy: str) -> bool:
+    """Stage 1: cheap TCP+HTTP check — does this proxy relay anything at all?
+    Uses a tiny http:// endpoint so it costs no upstream quota and is fast."""
     try:
-        async with httpx.AsyncClient(timeout=12, proxy=f"http://{proxy}") as client:
+        async with httpx.AsyncClient(timeout=6, proxy=f"http://{proxy}") as client:
+            r = await client.get("http://ip-api.com/json/")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def proxy_works(proxy: str) -> bool:
+    """Stage 2: real test — complete a 1-token upstream free request through it.
+    Proves (a) the proxy relays HTTPS CONNECT and (b) its IP is not burned."""
+    try:
+        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT, proxy=f"http://{proxy}") as client:
             r = await client.post(
                 f"{UPSTREAM_BASE_URL}/chat/completions",
                 headers={
@@ -216,41 +293,97 @@ async def proxy_works(proxy: str) -> bool:
     return False
 
 
-async def refresh_pool(force: bool = False) -> None:
+async def _alive_pool() -> list[str]:
     async with pool["lock"]:
-        if not force and time.time() - pool["updated"] < PROXY_REFRESH_SEC:
-            return
-        candidates = (await fetch_proxy_candidates())[:PROXY_MAX_CANDIDATES]
-        log.info("fetched %d proxy candidates (cap %d)", len(candidates), PROXY_MAX_CANDIDATES)
-    # NOTE: lock released before the sweep — the sweep commits re-acquire it
-    # briefly; holding it across gather would deadlock (asyncio.Lock is not
-    # reentrant and relay() needs it too).
-    good: list[str] = []
-    sem = asyncio.Semaphore(PROXY_TEST_CONCURRENCY)
-    done: set[str] = set()
-    last_commit = time.time()
+        return [p for p in pool["proxies"] if cooldowns.get(p, 0) <= time.time()]
 
-    async def test_and_commit(p: str):
-        nonlocal last_commit
+
+async def refresh_candidates(force: bool = False) -> None:
+    """Refill the candidate reservoir from the public lists."""
+    if not force and time.time() - sweep["last_refresh"] < PROXY_REFRESH_SEC:
+        return
+    fresh = await fetch_proxy_candidates()
+    now = time.time()
+    added = 0
+    for p in fresh:
+        if p in pool["proxies"] or p in candidates:
+            continue
+        # retest failed candidates after 10 min; burned ones stay parked via cooldowns
+        if tried.get(p, 0) > now - 600:
+            continue
+        if cooldowns.get(p, 0) > now:
+            continue
+        candidates[p] = now
+        added += 1
+    sweep["last_refresh"] = now
+    # cap the reservoir, dropping oldest first
+    if len(candidates) > PROXY_MAX_CANDIDATES:
+        overflow = len(candidates) - PROXY_MAX_CANDIDATES
+        for p, _ in sorted(candidates.items(), key=lambda kv: kv[1])[:overflow]:
+            candidates.pop(p, None)
+    parked = len([1 for t in cooldowns.values() if t > now])
+    log.info("candidates: +%d new, %d queued, %d parked (burned/cooldown)", added, len(candidates), parked)
+
+
+async def churn_batch(batch_size: int = 60) -> None:
+    """Test a small batch of candidates and commit good ones to the pool.
+    Runs continuously in the background — the pool fills up in minutes
+    instead of one giant slow sweep, and keeps topping up as lanes burn."""
+    if not candidates:
+        await refresh_candidates(force=False)
+        if not candidates:
+            return
+    batch = list(candidates.keys())[:batch_size]
+    for p in batch:
+        candidates.pop(p, None)
+    sweep["state"] = "testing"
+    sweep["tested"] = 0
+    sem = asyncio.Semaphore(PROXY_TEST_CONCURRENCY)
+
+    async def stage1(p: str) -> bool:
+        async with sem:
+            return await proxy_connectable(p)
+
+    results = await asyncio.gather(*(stage1(p) for p in batch))
+    alive = [p for p, ok in zip(batch, results) if ok]
+    for p, ok in zip(batch, results):
+        if not ok:
+            tried[p] = time.time()
+    good: list[str] = []
+
+    async def stage2(p: str):
         async with sem:
             ok = await proxy_works(p)
+            stats["candidates_tested"] += 1
+            sweep["tested"] += 1
             if ok:
                 good.append(p)
-            done.add(p)
-            # keep old pool serving while sweeping; only commit when the
-            # sweep is done or at a coarse progress checkpoint
-            if time.time() - last_commit > 10 or len(done) == len(candidates):
-                last_commit = time.time()
-                async with pool["lock"]:
-                    pool["proxies"] = [g for g in good if cooldowns.get(g, 0) <= time.time()]
-                    pool["updated"] = time.time()
-                log.info("pool progress: %d/%d tested, %d alive", len(done), len(candidates), len(pool["proxies"]))
+                stats["probes_ok"] += 1
+            elif cooldowns.get(p, 0) > time.time():
+                stats["probes_burned"] += 1
+            else:
+                tried[p] = time.time()
 
-    await asyncio.gather(*(test_and_commit(p) for p in candidates))
-    async with pool["lock"]:
-        pool["proxies"] = [g for g in good if cooldowns.get(g, 0) <= time.time()]
-        pool["updated"] = time.time()
-    log.info("proxy pool final: %d alive", len(pool["proxies"]))
+    await asyncio.gather(*(stage2(p) for p in alive))
+    if good:
+        async with pool["lock"]:
+            known = set(pool["proxies"])
+            pool["proxies"].extend([g for g in good if g not in known])
+            pool["updated"] = time.time()
+        sweep["found"] += len(good)
+    log.info("churn: tested %d (%d connectable), +%d good -> pool %d",
+             len(batch), len(alive), len(good), len(pool["proxies"]))
+    sweep["state"] = "idle"
+
+
+async def refresh_pool(force: bool = False) -> None:
+    """Manual/full refresh: refill candidates, then churn until the pool hits
+    target or candidates run out. Backs the dashboard 'Refresh pool' button."""
+    await refresh_candidates(force=force)
+    rounds = 0
+    while candidates and len(await _alive_pool()) < PROXY_POOL_TARGET and rounds < 8:
+        await churn_batch(batch_size=max(60, PROXY_TEST_CONCURRENCY * 3))
+        rounds += 1
 
 
 async def get_egress_candidates() -> list[tuple[str | None, str]]:
@@ -396,21 +529,31 @@ async def startup():
 
 
 async def bg_refresh():
+    """Continuous pool maintenance: keep the pool topped up to target by
+    churning small candidate batches. When the pool is healthy this idles;
+    when it's thin it works constantly. This replaced the old one-shot
+    sweep-every-10-min design that left the pool at 0 for long stretches."""
     while True:
         try:
-            # if the pool is getting thin, refresh every 30s instead of waiting
-            # the full interval — keeps up with IP burn under sustained load
-            async with pool["lock"]:
-                low = len([p for p in pool["proxies"] if cooldowns.get(p, 0) <= time.time()]) < PROXY_MIN_POOL
-            if low:
-                await refresh_pool(force=True)
-                await asyncio.sleep(30)
+            alive = await _alive_pool()
+            if len(alive) < PROXY_POOL_TARGET:
+                if not candidates:
+                    # reservoir dry — pull fresh lists right away; still rate-limited
+                    # to one fetch per 120s so we never hammer the public lists
+                    if time.time() - sweep["last_refresh"] > 120:
+                        await refresh_candidates(force=True)
+                    else:
+                        await asyncio.sleep(10)
+                        continue
+                await churn_batch(batch_size=max(300, PROXY_TEST_CONCURRENCY * 12))
+                await asyncio.sleep(2 if len(alive) < PROXY_MIN_POOL else 6)
             else:
-                await refresh_pool(force=False)
-                await asyncio.sleep(PROXY_REFRESH_SEC)
+                # pool healthy — slow cadence; refresh lists on the normal interval
+                await refresh_candidates(force=False)
+                await asyncio.sleep(60)
         except Exception as e:
             log.warning("bg refresh failed: %s", e)
-            await asyncio.sleep(30)
+            await asyncio.sleep(20)
 
 
 @app.get("/healthz")
@@ -421,15 +564,19 @@ async def healthz():
     try:
         if _models_cache["body"]:
             data = json.loads(_models_cache["body"])
-            models = [m.get("id", "") for m in data.get("data", [])][:5]
+            models = [m.get("id", "") for m in data.get("data", [])]
     except Exception:
         pass
     return {
         "ok": True,
         "pool": alive,
+        "pool_target": PROXY_POOL_TARGET,
+        "candidates": len(candidates),
+        "parked": len([1 for t in cooldowns.values() if t > time.time()]),
         "updated": pool["updated"],
         "key": mask_key(UPSTREAM_API_KEY),
         "stats": stats,
+        "sweep": dict(sweep),
         "models": models,
         "models_cached": bool(_models_cache["body"]),
     }
@@ -527,6 +674,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='none' stroke='%2322d3ee' stroke-width='2'/></svg>">
 <title>ip-relay dashboard</title>
 <style>
   :root {
@@ -733,6 +881,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .model-chip.used { color:var(--green); border-color:rgba(52,211,153,.4); }
   @media (max-width:920px) { .guide-grid { grid-template-columns:1fr; } }
 
+  /* pool status */
+  .pool-rows { margin-top:12px; }
+  .prow { display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:9px 2px; border-bottom:1px solid var(--line); font-size:12.5px; color:var(--muted); }
+  .prow:last-child { border-bottom:none; }
+  .prow b { color:var(--text); font-size:13px; }
+  .mono { font-family:var(--mono); }
+  .pool-tip { margin-top:12px; font-size:11.5px; color:var(--faint); line-height:1.6;
+    background:rgba(251,191,36,.05); border:1px solid rgba(251,191,36,.15); border-radius:10px; padding:10px 12px; display:none; }
+  .pool-tip.show { display:block; }
+
+  /* how it works + steps */
+  .howit p { font-size:12.5px; color:var(--muted); line-height:1.65; margin:0 0 10px; }
+  .howit p b { color:var(--cyan); }
+  .howit p.dim { color:var(--faint); border-top:1px solid var(--line); padding-top:10px; margin-top:12px; }
+  .steps { display:grid; gap:10px; margin-bottom:16px; }
+  .step { display:flex; gap:12px; align-items:flex-start; background:rgba(6,8,15,.5);
+    border:1px solid var(--line); border-radius:12px; padding:12px 14px; font-size:12.5px; color:var(--muted); line-height:1.6; }
+  .step b { color:var(--text); }
+  .step .n { flex:none; width:24px; height:24px; border-radius:50%; display:grid; place-items:center;
+    background:var(--grad); color:#fff; font-size:12px; font-weight:700; font-family:var(--mono); }
+
   @media (max-width:920px) {
     .stats { grid-template-columns:repeat(2,1fr); }
     .main-grid { grid-template-columns:1fr; }
@@ -843,6 +1013,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </section>
 
     <section class="panel">
+      <div class="panel-h"><h2>Pool status</h2><span class="hint" id="poolStateHint"></span></div>
+      <div class="pool-rows">
+        <div class="prow"><span>Working lanes</span><b id="psAlive" class="mono">–</b></div>
+        <div class="prow"><span>Parked (burned, cooling down)</span><b id="psParked" class="mono">–</b></div>
+        <div class="prow"><span>Untested candidates queued</span><b id="psQueue" class="mono">–</b></div>
+        <div class="prow"><span>Probes run / found / burned</span><b id="psProbes" class="mono">–</b></div>
+        <div class="prow"><span>Direct lane (this server's IP)</span><b id="psDirect" class="mono">–</b></div>
+      </div>
+      <div class="pool-tip" id="poolTip"></div>
+    </section>
+  </div>
+
+  <div class="main-grid" style="margin-top:16px">
+    <section class="panel">
       <div class="panel-h"><h2>Configuration</h2><span class="hint">applies live</span></div>
       <div class="cfg-grid">
         <label class="wide">Upstream API URL
@@ -863,6 +1047,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <label>Max candidates
           <input type="number" id="cfg_proxy_max_candidates" min="5">
         </label>
+        <label>Pool target (lanes)
+          <input type="number" id="cfg_proxy_pool_target" min="1">
+        </label>
+        <label>Probe timeout (s)
+          <input type="number" id="cfg_probe_timeout" min="5">
+        </label>
         <label>Probe model
           <input type="text" id="cfg_probe_model" placeholder="deepseek-v4-flash-free" spellcheck="false">
         </label>
@@ -876,40 +1066,54 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <button id="refreshBtn" class="btn ghost">Refresh pool</button>
       </div>
     </section>
+
+    <section class="panel">
+      <div class="panel-h"><h2>How it works</h2><span class="hint">60-second read</span></div>
+      <div class="howit">
+        <p><b>1.</b> Your app sends a normal OpenAI-style request to this relay.</p>
+        <p><b>2.</b> The relay forwards it to the upstream <em>through a proxy</em>, so the upstream sees the proxy's IP — not yours.</p>
+        <p><b>3.</b> When an IP hits its free quota (HTTP 429), the relay parks it for an hour and retries on the next IP automatically.</p>
+        <p><b>4.</b> A background churner constantly tests fresh proxies from public lists to keep the pool full — you don't manage anything.</p>
+        <p class="dim">Reality check: free proxies die fast and many are already rate-limited by other users. Expect the pool to hover well below the candidate count — that's normal. More tested candidates = more working lanes.</p>
+      </div>
+    </section>
   </div>
 
   <section class="panel guide" style="margin-top:16px">
     <div class="panel-h"><h2>How to connect</h2><span class="hint" id="guideModelCount"></span></div>
-    <p class="guide-intro">This relay speaks the OpenAI API. Point any client at <code class="code-inline" id="relayBase">http://&lt;your-server&gt;:8080/v1</code> and use one of the models below (no prefix — the relay strips any).</p>
+    <p class="guide-intro">This relay speaks the OpenAI API. Point any OpenAI-compatible client at <code class="code-inline" id="relayBase">…</code> and use one of the models below. Three steps:</p>
+    <div class="steps">
+      <div class="step"><span class="n">1</span><div><b>Copy your base URL</b> — it's filled in below, already pointing at this server.<br><span class="code-inline" id="relayBase2">…</span> <button class="btn ghost mini" style="position:static" data-copy="relayBase2">Copy</button></div></div>
+      <div class="step"><span class="n">2</span><div><b>Pick a model</b> from the list at the bottom (click any chip to copy). No provider prefix needed — the relay strips any.</div></div>
+      <div class="step"><span class="n">3</span><div><b>Use any key as the API key</b> — e.g. <span class="code-inline">public</span> — unless you set a relay key in Configuration, then use that.</div></div>
+    </div>
 
     <div class="guide-grid">
       <div class="guide-block">
         <h3>📋 curl</h3>
-        <pre class="code-block" id="codeCurl">curl http://localhost:8080/v1/chat/completions \
+        <pre class="code-block" id="codeCurl">curl BASE/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer public" \
   -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}'</pre>
         <button class="btn ghost mini" data-copy="codeCurl">Copy</button>
       </div>
       <div class="guide-block">
         <h3>🤖 Claude Code</h3>
-        <pre class="code-block"># add the model to your config
-# model: deepseek-v4-flash-free
-# ANTHROPIC_BASE_URL=http://localhost:8080/v1
-# ANTHROPIC_AUTH_TOKEN=public
-
-# in settings.json (Claude Code):
+        <pre class="code-block" id="codeClaude"># ~/.claude/settings.json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:8080/v1",
+    "ANTHROPIC_BASE_URL": "BASE",
     "ANTHROPIC_AUTH_TOKEN": "public"
   }
-}</pre>
+}
+# then: claude --model deepseek-v4-flash-free</pre>
+        <button class="btn ghost mini" data-copy="codeClaude">Copy</button>
       </div>
       <div class="guide-block">
         <h3>🐍 OpenAI SDK (Python)</h3>
-        <pre class="code-block">from openai import OpenAI
+        <pre class="code-block" id="codePy">from openai import OpenAI
 client = OpenAI(
-    base_url="http://localhost:8080/v1",
+    base_url="BASE",
     api_key="public",
 )
 r = client.chat.completions.create(
@@ -917,25 +1121,29 @@ r = client.chat.completions.create(
     messages=[{"role":"user","content":"hi"}],
 )
 print(r.choices[0].message.content)</pre>
+        <button class="btn ghost mini" data-copy="codePy">Copy</button>
       </div>
       <div class="guide-block">
         <h3>🔀 Through 9router</h3>
-        <pre class="code-block"># add the relay as a provider, then use the
-# provider prefix in front of the model:
-#   ocr/deepseek-v4-flash-free
-# (prefix comes from your 9router provider setup,
-#  not from the relay itself)</pre>
+        <pre class="code-block" id="code9r"># 9router dashboard → Providers → Add:
+#   Type:     OpenAI Compatible
+#   Base URL: BASE   ← use the host's docker bridge IP
+#                      (e.g. http://172.17.0.1:PORT/v1) if
+#                      9router runs in Docker on this machine
+#   API Key:  public
+# then call: PROVIDER_PREFIX/deepseek-v4-flash-free</pre>
+        <button class="btn ghost mini" data-copy="code9r">Copy</button>
       </div>
     </div>
 
     <div class="models-row">
-      <div class="panel-h" style="margin-top:14px"><h2>Available models</h2><span class="hint">from upstream, cached</span></div>
+      <div class="panel-h" style="margin-top:14px"><h2>Available models</h2><span class="hint">from upstream, cached — click to copy</span></div>
       <div id="modelsList" class="models-list">loading…</div>
     </div>
   </section>
 
   <footer>
-    <span>ip-relay v0.4.0</span><span class="dotsep">·</span>
+    <span>ip-relay v0.5.0</span><span class="dotsep">·</span>
     <a href="https://github.com/sajjadgazergar-work/ip-relay" target="_blank" rel="noopener">github</a><span class="dotsep">·</span>
     <span id="footState">—</span>
   </footer>
@@ -947,6 +1155,13 @@ print(r.choices[0].message.content)</pre>
 function $(id){ return document.getElementById(id); }
 function esc(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2600); }
+
+// dynamic base URL — the dashboard knows where it's being served from
+const BASE = location.origin + '/v1';
+['relayBase','relayBase2'].forEach(id => { const el=$(id); if(el) el.textContent = BASE; });
+['codeCurl','codeClaude','codePy','code9r'].forEach(id => {
+  const el=$(id); if(el) el.innerHTML = el.innerHTML.split('BASE').join(BASE);
+});
 
 async function jget(url){ const r=await fetch(url); if(r.status===401){ window.location.href='/login'; throw new Error('unauthorized'); } if(!r.ok) throw new Error((await r.text()).slice(0,120)); return r.json(); }
 
@@ -1021,8 +1236,31 @@ function renderMesh(pool){
   }
   core.classList.toggle('empty', pool === 0);
   $('meshNote').textContent = pool === 0
-    ? 'warming up — pool empty, retrying…'
+    ? 'warming up — testing proxy candidates, first lanes take a few minutes'
     : 'each dot = a request flowing through a fresh proxy IP';
+}
+
+function renderPoolStatus(h){
+  if(!h) return;
+  const st = h.stats || {}, sw = h.sweep || {};
+  $('psAlive').textContent = (h.pool ?? 0) + ' / ' + (h.pool_target ?? '?') + ' target';
+  $('psParked').textContent = h.parked ?? 0;
+  $('psQueue').textContent = h.candidates ?? 0;
+  $('psProbes').textContent = (st.candidates_tested||0) + ' / ' + (st.probes_ok||0) + ' / ' + (st.probes_burned||0);
+  $('psDirect').textContent = 'unknown';
+  $('poolStateHint').textContent = sw.state === 'testing' ? 'testing batch…' : (sw.state || 'idle');
+  const tip = $('poolTip');
+  if((h.pool ?? 0) === 0){
+    tip.classList.add('show');
+    tip.textContent = (h.candidates > 0)
+      ? 'Pool is empty but ' + h.candidates + ' candidates are queued — the churner is testing them now. First working lanes usually appear within a few minutes. Watch the live log.'
+      : 'Pool is empty and no candidates are queued — the proxy lists may be unreachable from this server. Check the live log for fetch errors.';
+  } else if((h.pool ?? 0) < 5){
+    tip.classList.add('show');
+    tip.textContent = 'Pool is thin. Free proxies burn out fast — the churner keeps testing new candidates continuously. Raising "Max candidates" in Configuration widens the search.';
+  } else {
+    tip.classList.remove('show');
+  }
 }
 
 // log rendering
@@ -1065,6 +1303,7 @@ async function refresh(){
     if(lastReq !== null) pushSpark(Math.max(0, (h.stats.requests||0) - lastReq));
     lastReq = h.stats ? (h.stats.requests||0) : 0;
     renderMesh(h.pool || 0);
+    renderPoolStatus(h);
     renderModels(h.models || []);
     const logs = await jget('/api/logs?n=100');
     renderLogs(logs.logs || []);
@@ -1109,8 +1348,10 @@ async function loadSettings(){
     $('cfg_upstream_api_key').value = s.upstream_api_key || '';
     $('cfg_relay_api_key').value = s.relay_api_key || '';
     $('cfg_proxy_refresh_sec').value = s.proxy_refresh_sec ?? 600;
-    $('cfg_proxy_test_concurrency').value = s.proxy_test_concurrency ?? 12;
-    $('cfg_proxy_max_candidates').value = s.proxy_max_candidates ?? 150;
+    $('cfg_proxy_test_concurrency').value = s.proxy_test_concurrency ?? 25;
+    $('cfg_proxy_max_candidates').value = s.proxy_max_candidates ?? 2000;
+    $('cfg_proxy_pool_target').value = s.proxy_pool_target ?? 25;
+    $('cfg_probe_timeout').value = s.probe_timeout ?? 20;
     $('cfg_probe_model').value = s.probe_model || '';
     $('cfg_direct_lane').checked = !!s.direct_lane;
   }catch(e){}
@@ -1122,8 +1363,10 @@ async function saveConfig(){
     upstream_api_key: $('cfg_upstream_api_key').value.trim(),
     relay_api_key: $('cfg_relay_api_key').value.trim(),
     proxy_refresh_sec: parseInt($('cfg_proxy_refresh_sec').value || '600', 10),
-    proxy_test_concurrency: parseInt($('cfg_proxy_test_concurrency').value || '12', 10),
-    proxy_max_candidates: parseInt($('cfg_proxy_max_candidates').value || '150', 10),
+    proxy_test_concurrency: parseInt($('cfg_proxy_test_concurrency').value || '25', 10),
+    proxy_max_candidates: parseInt($('cfg_proxy_max_candidates').value || '2000', 10),
+    proxy_pool_target: parseInt($('cfg_proxy_pool_target').value || '25', 10),
+    probe_timeout: parseInt($('cfg_probe_timeout').value || '20', 10),
     probe_model: $('cfg_probe_model').value.trim(),
     direct_lane: $('cfg_direct_lane').checked,
   };
@@ -1270,6 +1513,49 @@ async def refresh_api(request: Request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     asyncio.create_task(refresh_pool(force=True))
     return {"ok": True}
+
+
+# ── pool status & diagnostics ─────────────────────────────────────
+
+@app.get("/api/pool")
+async def pool_api(request: Request):
+    """Full pool breakdown: alive lanes, parked (burned) lanes, queue depth."""
+    if not _check_dashboard_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    now = time.time()
+    async with pool["lock"]:
+        alive = [p for p in pool["proxies"] if cooldowns.get(p, 0) <= now]
+        parked = [{"proxy": p, "ready_in_s": round(cooldowns[p] - now)}
+                  for p in pool["proxies"] if cooldowns.get(p, 0) > now]
+    return {
+        "alive": alive,
+        "parked": sorted(parked, key=lambda x: x["ready_in_s"]),
+        "queue": len(candidates),
+        "target": PROXY_POOL_TARGET,
+        "sweep": dict(sweep),
+        "stats": stats,
+        "direct_lane": DIRECT_LANE,
+        "direct_burned": time.time() < direct_burned_until,
+        "updated": pool["updated"],
+    }
+
+
+@app.get("/api/stats")
+async def stats_api(request: Request):
+    """Compact stats for the dashboard cards."""
+    if not _check_dashboard_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with pool["lock"]:
+        alive = len([p for p in pool["proxies"] if cooldowns.get(p, 0) <= time.time()])
+    return {
+        "pool": alive,
+        "pool_target": PROXY_POOL_TARGET,
+        "candidates": len(candidates),
+        "parked": len([1 for t in cooldowns.values() if t > time.time()]),
+        "stats": stats,
+        "sweep": dict(sweep),
+        "updated": pool["updated"],
+    }
 
 
 if __name__ == "__main__":

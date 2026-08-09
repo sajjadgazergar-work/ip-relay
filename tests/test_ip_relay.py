@@ -16,8 +16,12 @@ def fresh_state(monkeypatch):
     ip_relay.pool["proxies"] = []
     ip_relay.pool["updated"] = 0.0
     ip_relay.cooldowns = {}
+    ip_relay.candidates = {}
+    ip_relay.tried = {}
     ip_relay.direct_burned_until = 0.0
-    ip_relay.stats = {"requests": 0, "rotations": 0, "lane_failures": 0}
+    ip_relay.stats = {"requests": 0, "rotations": 0, "lane_failures": 0,
+                      "candidates_tested": 0, "probes_ok": 0, "probes_burned": 0}
+    ip_relay.sweep = {"state": "idle", "tested": 0, "found": 0, "last_refresh": 0.0, "sources_ok": 0}
     # reset settings to defaults, no direct lane in most tests
     ip_relay.apply_settings({
         "upstream_base_url": "https://upstream.test/v1",
@@ -290,3 +294,59 @@ def test_dashboard_refresh_api(monkeypatch):
     r = client.post("/api/refresh")
     assert r.status_code == 200
     assert r.json() == {"ok": True}
+
+
+def test_parse_text_list():
+    text = "1.2.3.4:8080\n# comment\n\n5.6.7.8:3128\nhttp://user:pass@9.9.9.9:80\nbad-line\n"
+    got = ip_relay._parse_text_list(text)
+    assert "1.2.3.4:8080" in got
+    assert "5.6.7.8:3128" in got
+    assert "bad-line" not in got
+
+
+def test_parse_geonode():
+    text = json.dumps({"data": [{"ip": "1.2.3.4", "port": "8080"}, {"ip": "5.6.7.8", "port": "3128"}]})
+    assert ip_relay._parse_geonode(text) == ["1.2.3.4:8080", "5.6.7.8:3128"]
+    assert ip_relay._parse_geonode("not json") == []
+
+
+def test_churn_batch_commits_good(monkeypatch):
+    """Churner: stage-1 filters dead, stage-2 commits upstream-working to pool."""
+    import ip_relay as ir
+    ir.candidates = {"good1:80": 1.0, "good2:80": 1.0, "dead:80": 1.0, "burned:80": 1.0}
+
+    async def fake_connectable(p):
+        return p != "dead:80"
+
+    async def fake_works(p):
+        if p == "burned:80":
+            ir.cooldowns[p] = 1e18
+            return False
+        return p.startswith("good")
+
+    monkeypatch.setattr(ir, "proxy_connectable", fake_connectable)
+    monkeypatch.setattr(ir, "proxy_works", fake_works)
+    asyncio.run(ir.churn_batch(batch_size=10))
+    assert sorted(ir.pool["proxies"]) == ["good1:80", "good2:80"]
+    assert ir.stats["probes_ok"] == 2
+    assert ir.stats["probes_burned"] == 1
+    assert "dead:80" in ir.tried
+    assert ir.candidates == {}
+
+
+def test_pool_and_stats_apis(monkeypatch):
+    import ip_relay as ir
+    ir.apply_settings({"relay_api_key": ""}, persist=False)
+    ir.pool["proxies"] = ["1.2.3.4:80", "5.6.7.8:80"]
+    ir.cooldowns["5.6.7.8:80"] = 1e18
+    ir.candidates = {"9.9.9.9:80": 1.0}
+    client = TestClient(ir.app)
+    r = client.get("/api/pool")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["alive"] == ["1.2.3.4:80"]
+    assert data["parked"][0]["proxy"] == "5.6.7.8:80"
+    assert data["queue"] == 1
+    r2 = client.get("/api/stats")
+    assert r2.status_code == 200
+    assert r2.json()["pool"] == 1
