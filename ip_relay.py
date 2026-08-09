@@ -532,35 +532,44 @@ async def _probe_candidate(key: str) -> Lane | None:
                 return None
 
         # Stage 2: Full upstream completions check
-        async with httpx.AsyncClient(proxy=proxy_url, timeout=PROBE_TIMEOUT, verify=False) as c:
-            t0 = time.time()
-            r = await c.post(
-                f"{UPSTREAM_BASE_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {UPSTREAM_API_KEY}", "Content-Type": "application/json"},
-                json={"model": PROBE_MODEL, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
-            )
-            lat = (time.time() - t0) * 1000
-            if r.status_code == 200 and _looks_like_completion(r.content):
-                # reject lanes too slow to ever serve a real request
-                if lat > RELAY_PROXY_TIMEOUT * 1000 * 0.9:
+        try:
+            async with httpx.AsyncClient(proxy=proxy_url, timeout=PROBE_TIMEOUT, verify=False) as c:
+                t0 = time.time()
+                r = await c.post(
+                    f"{UPSTREAM_BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {UPSTREAM_API_KEY}", "Content-Type": "application/json"},
+                    json={"model": PROBE_MODEL, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
+                )
+                lat = (time.time() - t0) * 1000
+                if r.status_code == 200 and _looks_like_completion(r.content):
+                    # reject lanes too slow to ever serve a real request
+                    if lat > RELAY_PROXY_TIMEOUT * 1000 * 0.9:
+                        ln = Lane(addr, proto)
+                        ln.mark_fail(burn=True)
+                        ln.last_probe = time.time()
+                        log.warning("Prober: Lane %s passed, but latency was too slow (%dms > limit %dms)",
+                                    addr, int(lat), int(RELAY_PROXY_TIMEOUT * 1000 * 0.9))
+                        return ln
+                    ln = Lane(addr, proto)
+                    ln.mark_ok(lat)
+                    log.info("Prober: +Lane %s passed completion test (%dms)", addr, int(lat))
+                    STATS["probes_ok"] += 1
+                    return ln
+                elif r.status_code == 429 and is_quota_429(r.content, 429):
+                    # burned IP — still keep it, parked; it recovers when quota resets
                     ln = Lane(addr, proto)
                     ln.mark_fail(burn=True)
                     ln.last_probe = time.time()
+                    STATS["probes_burned"] += 1
+                    log.info("Prober: Lane %s rate-limited (429) by upstream (parked)", addr)
                     return ln
-                ln = Lane(addr, proto)
-                ln.mark_ok(lat)
-                log.info("Prober: +Lane %s passed completion test (%dms)", addr, int(lat))
-                STATS["probes_ok"] += 1
-                return ln
-            if r.status_code == 429 and is_quota_429(r.content, 429):
-                # burned IP — still keep it, parked; it recovers when quota resets
-                ln = Lane(addr, proto)
-                ln.mark_fail(burn=True)
-                ln.last_probe = time.time()
-                STATS["probes_burned"] += 1
-                return ln
-    except Exception:
-        pass
+                else:
+                    log.warning("Prober: Lane %s failed Stage 2: HTTP %d (Response: %s)",
+                                addr, r.status_code, r.text[:100].strip())
+        except Exception as e:
+            log.warning("Prober: Lane %s failed Stage 2 connection: %s", addr, type(e).__name__)
+    except Exception as e:
+        log.warning("Prober: Lane %s failed Stage 1 setup: %s", addr, type(e).__name__)
     return None
 
 
@@ -1094,8 +1103,31 @@ def openai_sse_to_anthropic(body: bytes, model: str) -> bytes:
 @app.on_event("startup")
 async def startup():
     load_settings()
+    
+    # 1. SOCKS library validation
+    try:
+        import socksio
+    except ImportError:
+        log.error("CRITICAL ERROR: SOCKS proxy support is missing! SOCKS4/5 proxies will be ignored. "
+                  "Please run: pip install 'httpx[socks]' to install SOCKS dependencies.")
+
     asyncio.create_task(pool_manager())
-    asyncio.create_task(get_models_cached())
+    
+    # 2. Direct validation check against the Upstream on startup
+    async def verify_upstream():
+        try:
+            status, _, body = await get_models_cached()
+            if status == 200:
+                log.info("Upstream verification: Upstream base URL and API key are VALID.")
+            else:
+                log.error("CRITICAL Upstream verification FAILED (HTTP %d). "
+                          "Your configured UPSTREAM_BASE_URL ('%s') or UPSTREAM_API_KEY might be invalid. "
+                          "Response: %s", status, UPSTREAM_BASE_URL, body[:150].decode('utf-8', errors='ignore'))
+        except Exception as e:
+            log.error("CRITICAL Upstream connection FAILED: Could not reach upstream on startup: %s. "
+                      "Verify your network or UPSTREAM_BASE_URL ('%s').", e, UPSTREAM_BASE_URL)
+
+    asyncio.create_task(verify_upstream())
 
 
 @app.get("/healthz")
