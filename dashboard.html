@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ip-relay // egress rotator</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fbfbfb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cline x1='2' y1='12' x2='22' y2='12'/%3E%3Cpath d='M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -1111,23 +1112,34 @@ function updateSlider(name) {
 }
 
 // Stats & configuration synchronization
+let settingsHydrated = false;
 async function loadSettings() {
   try {
     const r = await fetch('/api/stats');
     const d = await r.json();
     
-    // Set dynamic Base URL chip
+    // Set dynamic Base URL chip (always)
     document.getElementById('baseUrlVal').innerText = originHost + '/v1';
     
-    // Sliders
-    document.getElementById('cfgPoolTarget').value = d.settings.proxy_pool_target;
-    updateSlider('PoolTarget');
-    document.getElementById('cfgConcurrency').value = d.settings.proxy_test_concurrency;
-    updateSlider('Concurrency');
-    
-    // Inputs & toggles
-    document.getElementById('cfgWebshare').value = d.settings.webshare_token || '';
-    document.getElementById('cfgDirectLane').checked = d.settings.direct_lane;
+    // Hydrate form fields ONLY on first load — never overwrite what the
+    // user is typing/editing on subsequent polls.
+    if (!settingsHydrated) {
+      settingsHydrated = true;
+      
+      // Sliders
+      document.getElementById('cfgPoolTarget').value = d.settings.proxy_pool_target;
+      updateSlider('PoolTarget');
+      document.getElementById('cfgConcurrency').value = d.settings.proxy_test_concurrency;
+      updateSlider('Concurrency');
+      
+      // Inputs & toggles
+      const wsToken = d.settings.webshare_token || '';
+      // If the server returns a masked value (contains '...'), show an empty
+      // field so the user can type a new key without fighting the mask.
+      document.getElementById('cfgWebshare').value =
+        (wsToken.includes('...') || wsToken === '(none)') ? '' : wsToken;
+      document.getElementById('cfgDirectLane').checked = d.settings.direct_lane;
+    }
     
     updateTelemetry(d);
   } catch(e) {
@@ -1294,45 +1306,47 @@ const netCtx = netCanvas ? netCanvas.getContext('2d') : null;
 let netW = 0, netH = 0;
 let netNodes = [];
 let netParticles = [];
+let globalTime = 0;
 
 function resizeNetCanvas() {
   if (!netCanvas) return;
   const rect = netCanvas.getBoundingClientRect();
-  netW = netCanvas.width = rect.width;
-  netH = netCanvas.height = rect.height;
+  const dpr = window.devicePixelRatio || 1;
+  netW = netCanvas.width = rect.width * dpr;
+  netH = netCanvas.height = rect.height * dpr;
+  netCtx.scale(dpr, dpr);
 }
 
 function syncNetworkGraph(warmLanes) {
   if (!netCanvas) return;
-  const cx = netW / 2;
-  const cy = netH / 2;
-  const rx = Math.min(cx, cy) * 0.75;
-  const ry = Math.min(cx, cy) * 0.55;
+  const cx = netCanvas.width / (2 * (window.devicePixelRatio || 1));
+  const cy = netCanvas.height / (2 * (window.devicePixelRatio || 1));
 
   const existing = new Map(netNodes.map(n => [n.addr, n]));
   const updated = [];
 
   warmLanes.forEach((ln, i) => {
-    const angle = (i / Math.max(warmLanes.length, 1)) * Math.PI * 2 + Date.now() * 0.00005;
-    const tx = cx + Math.cos(angle) * rx;
-    const ty = cy + Math.sin(angle) * ry;
-
+    // Distribute nodes in a pseudo-3D layered double ellipse structure
+    const layer = i % 2;
+    const count = Math.max(warmLanes.length, 1);
+    const angle = (i / count) * Math.PI * 2;
+    
     let node = existing.get(ln.addr);
     const color = (ln.lat_ms && ln.lat_ms < 1500) ? '#4ade80' : (ln.lat_ms && ln.lat_ms < 4000) ? '#facc15' : '#f87171';
     
     if (!node) {
       node = {
         addr: ln.addr,
-        x: cx + (Math.random() - 0.5) * 40,
-        y: cy + (Math.random() - 0.5) * 40,
-        tx: tx,
-        ty: ty,
+        angle: angle,
+        layer: layer,
+        speed: 0.0001 + Math.random() * 0.0001,
+        // Start random then float to target
+        x: cx + (Math.random() - 0.5) * 150,
+        y: cy + (Math.random() - 0.5) * 80,
         color: color,
         pulse: 0
       };
     } else {
-      node.tx = tx;
-      node.ty = ty;
       node.color = color;
     }
     updated.push(node);
@@ -1340,17 +1354,18 @@ function syncNetworkGraph(warmLanes) {
 
   netNodes = updated;
 
-  // Emit dynamic traffic particle towards a random active lane
-  if (netNodes.length > 0 && Math.random() < 0.5) {
+  // Emit a traffic particle from center core to a random node
+  if (netNodes.length > 0 && Math.random() < 0.45) {
     const target = netNodes[Math.floor(Math.random() * netNodes.length)];
     netParticles.push({
       x: cx,
       y: cy,
-      tx: target.tx,
-      ty: target.ty,
+      target: target,
       progress: 0,
-      speed: 0.02 + Math.random() * 0.025,
-      color: target.color
+      speed: 0.015 + Math.random() * 0.02,
+      // Random control point for bezier curve path
+      cpX: cx + (Math.random() - 0.5) * 80,
+      cpY: cy + (Math.random() - 0.5) * 80
     });
   }
 }
@@ -1360,81 +1375,151 @@ function animNetworkGraph() {
     requestAnimationFrame(animNetworkGraph);
     return;
   }
-  netCtx.clearRect(0, 0, netW, netH);
+  const dpr = window.devicePixelRatio || 1;
+  const cw = netCanvas.width / dpr;
+  const ch = netCanvas.height / dpr;
+  
+  netCtx.clearRect(0, 0, cw, ch);
+  globalTime += 0.005;
 
-  const cx = netW / 2;
-  const cy = netH / 2;
+  const cx = cw / 2;
+  const cy = ch / 2;
 
-  // 1. Draw central relay core
-  netCtx.shadowBlur = 12;
-  netCtx.shadowColor = 'rgba(251, 251, 251, 0.7)';
-  netCtx.fillStyle = '#ffffff';
-  netCtx.beginPath();
-  netCtx.arc(cx, cy, 10, 0, Math.PI * 2);
-  netCtx.fill();
+  // Orbit parameters
+  const rx = cw * 0.38;
+  const ry = ch * 0.28;
 
-  netCtx.shadowBlur = 0;
-  netCtx.fillStyle = '#888';
-  netCtx.font = '9px monospace';
-  netCtx.textAlign = 'center';
-  netCtx.fillText('RELAY CORE', cx, cy + 22);
-
-  // 2. Render proxy node connections
+  // Update node orbit targets in pseudo-3D (front/back depth using Z-axis)
   netNodes.forEach(n => {
-    n.x += (n.tx - n.x) * 0.06;
-    n.y += (n.ty - n.y) * 0.06;
+    n.angle += n.speed;
+    
+    // Pseudo-3D Z depth projection
+    const z = Math.cos(n.angle + (n.layer * Math.PI * 0.5));
+    const xOffset = Math.sin(n.angle + (n.layer * Math.PI * 0.5)) * rx;
+    // Tilt the orbits slightly
+    const yOffset = z * ry + (n.layer === 0 ? -12 : 12);
 
-    // Line from core to node
+    n.tx = cx + xOffset;
+    n.ty = cy + yOffset;
+    n.z = z; // depth factor (-1 to 1)
+
+    // Smooth lerping to position
+    n.x += (n.tx - n.x) * 0.08;
+    n.y += (n.ty - n.y) * 0.08;
+  });
+
+  // Enable composite screen rendering for lights blend/glow
+  netCtx.save();
+  netCtx.globalCompositeOperation = 'screen';
+
+  // 1. Draw glowing connection beams (back nodes first for depth layering)
+  netNodes.sort((a, b) => a.z - b.z);
+
+  netNodes.forEach(n => {
+    const alpha = (n.z + 1.2) / 2.2; // fade back connections more
     netCtx.beginPath();
+    // Curved bezier link from core to node
     netCtx.moveTo(cx, cy);
-    netCtx.lineTo(n.x, n.y);
-    netCtx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
-    netCtx.lineWidth = 1;
+    const cpX = cx + (n.x - cx) * 0.4;
+    const cpY = cy + (n.y - cy) * 0.7;
+    netCtx.quadraticCurveTo(cpX, cpY, n.x, n.y);
+    
+    const grad = netCtx.createLinearGradient(cx, cy, n.x, n.y);
+    grad.addColorStop(0, 'rgba(251, 251, 251, 0.04)');
+    grad.addColorStop(1, n.color === '#4ade80' ? `rgba(74, 222, 128, ${0.12 * alpha})` : n.color === '#facc15' ? `rgba(250, 204, 21, ${0.12 * alpha})` : `rgba(248, 113, 113, ${0.12 * alpha})`);
+    
+    netCtx.strokeStyle = grad;
+    netCtx.lineWidth = 1 + (n.z + 1) * 0.5; // thinner back lines
     netCtx.stroke();
+  });
 
-    // Proxy Node Dot
-    netCtx.shadowBlur = 6;
+  // 2. Render proxy nodes with bloom and depth sizing
+  netNodes.forEach(n => {
+    const scale = (n.z + 1.8) / 2.8; // Z scale factor (0.3 to 1.3)
+    const radius = 3.5 * scale;
+    const alpha = (n.z + 1.2) / 2.2;
+
+    // Outer aura glow
+    netCtx.shadowBlur = 10 * scale;
     netCtx.shadowColor = n.color;
     netCtx.fillStyle = n.color;
+    netCtx.globalAlpha = 0.85 * alpha;
+    
     netCtx.beginPath();
-    netCtx.arc(n.x, n.y, 4, 0, Math.PI * 2);
+    netCtx.arc(n.x, n.y, radius, 0, Math.PI * 2);
     netCtx.fill();
     netCtx.shadowBlur = 0;
+    netCtx.globalAlpha = 1.0;
 
-    // Pulse ring
+    // Inner bright core
+    netCtx.fillStyle = '#ffffff';
+    netCtx.beginPath();
+    netCtx.arc(n.x, n.y, radius * 0.45, 0, Math.PI * 2);
+    netCtx.fill();
+
+    // Concentric shockwave waves (triggered on hit)
     if (n.pulse > 0) {
-      netCtx.beginPath();
-      netCtx.arc(n.x, n.y, 4 + (1 - n.pulse) * 12, 0, Math.PI * 2);
       netCtx.strokeStyle = n.color;
-      netCtx.lineWidth = n.pulse;
+      netCtx.globalAlpha = n.pulse;
+      netCtx.lineWidth = 1;
+      netCtx.beginPath();
+      netCtx.arc(n.x, n.y, radius + (1 - n.pulse) * 20, 0, Math.PI * 2);
       netCtx.stroke();
-      n.pulse -= 0.03;
+      
+      // Secondary echo wave
+      if (n.pulse > 0.4) {
+        netCtx.beginPath();
+        netCtx.arc(n.x, n.y, radius + (1 - n.pulse) * 32, 0, Math.PI * 2);
+        netCtx.stroke();
+      }
+      n.pulse -= 0.025;
+      netCtx.globalAlpha = 1.0;
     }
   });
 
-  // 3. Render moving traffic particles
+  // 3. Render traffic particles moving along curved paths
   for (let i = netParticles.length - 1; i >= 0; i--) {
     const p = netParticles[i];
     p.progress += p.speed;
-    const px = cx + (p.tx - cx) * p.progress;
-    const py = cy + (p.ty - cy) * p.progress;
 
-    netCtx.shadowBlur = 8;
-    netCtx.shadowColor = p.color;
-    netCtx.fillStyle = p.color;
+    // Quadratic Bezier interpolation for curved particle flight path
+    const t = p.progress;
+    const px = (1 - t) * (1 - t) * cx + 2 * (1 - t) * t * p.cpX + t * t * p.target.x;
+    const py = (1 - t) * (1 - t) * cy + 2 * (1 - t) * t * p.cpY + t * t * p.target.y;
+
+    const scale = (p.target.z + 1.8) / 2.8;
+
+    netCtx.shadowBlur = 8 * scale;
+    netCtx.shadowColor = p.target.color;
+    netCtx.fillStyle = p.target.color;
     netCtx.beginPath();
-    netCtx.arc(px, py, 2.5, 0, Math.PI * 2);
+    netCtx.arc(px, py, 2 * scale, 0, Math.PI * 2);
     netCtx.fill();
     netCtx.shadowBlur = 0;
 
     if (p.progress >= 1) {
-      // Trigger pulse ring on target node
-      const targetNode = netNodes.find(n => Math.abs(n.tx - p.tx) < 5 && Math.abs(n.ty - p.ty) < 5);
-      if (targetNode) targetNode.pulse = 1;
+      p.target.pulse = 1.0; // Trigger ripples on hit
       netParticles.splice(i, 1);
     }
   }
 
+  // 4. Draw central core node with breathing halo
+  const coreGlow = 10 + Math.sin(globalTime * 4) * 4;
+  netCtx.shadowBlur = coreGlow;
+  netCtx.shadowColor = 'rgba(251, 251, 251, 0.9)';
+  netCtx.fillStyle = '#ffffff';
+  netCtx.beginPath();
+  netCtx.arc(cx, cy, 9, 0, Math.PI * 2);
+  netCtx.fill();
+  netCtx.shadowBlur = 0;
+
+  // Core title text
+  netCtx.fillStyle = '#a1a1aa';
+  netCtx.font = '8px monospace';
+  netCtx.textAlign = 'center';
+  netCtx.fillText('RELAY CORE', cx, cy + 20);
+
+  netCtx.restore();
   requestAnimationFrame(animNetworkGraph);
 }
 
