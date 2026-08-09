@@ -396,8 +396,9 @@ async def _fetch_sources() -> None:
             nonlocal added, ok
             if not WEBSHARE_TOKEN:
                 return
-            # Split tokens by comma to support multiple Webshare keys
-            tokens = [t.strip() for t in WEBSHARE_TOKEN.split(",") if t.strip()]
+            # Split tokens by comma, semicolon, newline, or whitespace to support multiple accounts/keys
+            import re
+            tokens = [t.strip() for t in re.split(r"[\s,;\n\r]+", WEBSHARE_TOKEN) if t.strip()]
             
             async def fetch_one_token(token):
                 nonlocal added, ok

@@ -761,6 +761,24 @@ tr:hover td {
     </div>
   </div>
 
+  <!-- Live Egress Network Topology Visualizer Card -->
+  <div class="card-30" style="margin-bottom: 24px; position: relative; overflow: hidden; padding: 20px;">
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+      <div class="card-title" style="margin-bottom: 0;">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        Live Egress Topology & Traffic Matrix
+      </div>
+      <div style="font-size: 11px; color: #4ade80; font-family: var(--font-mono); display: flex; align-items: center; gap: 6px;">
+        <span style="display: inline-block; width: 6px; height: 6px; background: #4ade80; border-radius: 50%; box-shadow: 0 0 8px #4ade80; animation: pulse 1.5s infinite;"></span>
+        <span id="netStatusText">ACTIVE MATRIX</span>
+      </div>
+    </div>
+    
+    <div style="position: relative; width: 100%; height: 210px; background: rgba(0, 0, 0, 0.4); border-radius: 16px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.05);">
+      <canvas id="networkCanvas" style="width: 100%; height: 100%; display: block;"></canvas>
+    </div>
+  </div>
+
   <!-- Main Content Grid -->
   <div class="grid-main">
     <!-- Left Column: Guide & Dynamic Egress Lanes -->
@@ -858,8 +876,9 @@ tr:hover td {
           </div>
           
           <div class="input-container" style="margin-bottom: 20px;">
-            <label class="input-label" for="cfgWebshare">Webshare API Token</label>
-            <input type="password" class="input-element" id="cfgWebshare" placeholder="Optional token for premium lanes">
+            <label class="input-label" for="cfgWebshare">Webshare API Accounts (Keys / Tokens)</label>
+            <textarea class="input-element" id="cfgWebshare" rows="3" style="resize: vertical; font-family: monospace; font-size: 11px; line-height: 1.4; padding: 12px; background: rgba(0, 0, 0, 0.4);" placeholder="Paste Webshare API keys here (one key per line, or comma-separated)"></textarea>
+            <span style="font-size: 9px; color: var(--text-muted); margin-top: 4px; display: block;">Paste multiple accounts/tokens. All keys are encrypted locally on disk.</span>
           </div>
           
           <div class="toggle-container" style="margin-bottom: 24px;">
@@ -1168,6 +1187,11 @@ async function refreshPool() {
     const r = await fetch('/api/pool');
     const d = await r.json();
     
+    // Sync telemetry network visualizer graph
+    if (typeof syncNetworkGraph === 'function') {
+      syncNetworkGraph(d.warm);
+    }
+    
     const rows = document.getElementById('laneRows');
     const ratio = document.getElementById('laneRatio');
     
@@ -1264,10 +1288,163 @@ async function pollLogs() {
 
 const dataCache = { warm: 0, requests: 0, failovers: 0 };
 
+// ── Live Network Graph Visualizer ──────────────────
+const netCanvas = document.getElementById('networkCanvas');
+const netCtx = netCanvas ? netCanvas.getContext('2d') : null;
+let netW = 0, netH = 0;
+let netNodes = [];
+let netParticles = [];
+
+function resizeNetCanvas() {
+  if (!netCanvas) return;
+  const rect = netCanvas.getBoundingClientRect();
+  netW = netCanvas.width = rect.width;
+  netH = netCanvas.height = rect.height;
+}
+
+function syncNetworkGraph(warmLanes) {
+  if (!netCanvas) return;
+  const cx = netW / 2;
+  const cy = netH / 2;
+  const rx = Math.min(cx, cy) * 0.75;
+  const ry = Math.min(cx, cy) * 0.55;
+
+  const existing = new Map(netNodes.map(n => [n.addr, n]));
+  const updated = [];
+
+  warmLanes.forEach((ln, i) => {
+    const angle = (i / Math.max(warmLanes.length, 1)) * Math.PI * 2 + Date.now() * 0.00005;
+    const tx = cx + Math.cos(angle) * rx;
+    const ty = cy + Math.sin(angle) * ry;
+
+    let node = existing.get(ln.addr);
+    const color = (ln.lat_ms && ln.lat_ms < 1500) ? '#4ade80' : (ln.lat_ms && ln.lat_ms < 4000) ? '#facc15' : '#f87171';
+    
+    if (!node) {
+      node = {
+        addr: ln.addr,
+        x: cx + (Math.random() - 0.5) * 40,
+        y: cy + (Math.random() - 0.5) * 40,
+        tx: tx,
+        ty: ty,
+        color: color,
+        pulse: 0
+      };
+    } else {
+      node.tx = tx;
+      node.ty = ty;
+      node.color = color;
+    }
+    updated.push(node);
+  });
+
+  netNodes = updated;
+
+  // Emit dynamic traffic particle towards a random active lane
+  if (netNodes.length > 0 && Math.random() < 0.5) {
+    const target = netNodes[Math.floor(Math.random() * netNodes.length)];
+    netParticles.push({
+      x: cx,
+      y: cy,
+      tx: target.tx,
+      ty: target.ty,
+      progress: 0,
+      speed: 0.02 + Math.random() * 0.025,
+      color: target.color
+    });
+  }
+}
+
+function animNetworkGraph() {
+  if (!netCtx || !netW) {
+    requestAnimationFrame(animNetworkGraph);
+    return;
+  }
+  netCtx.clearRect(0, 0, netW, netH);
+
+  const cx = netW / 2;
+  const cy = netH / 2;
+
+  // 1. Draw central relay core
+  netCtx.shadowBlur = 12;
+  netCtx.shadowColor = 'rgba(251, 251, 251, 0.7)';
+  netCtx.fillStyle = '#ffffff';
+  netCtx.beginPath();
+  netCtx.arc(cx, cy, 10, 0, Math.PI * 2);
+  netCtx.fill();
+
+  netCtx.shadowBlur = 0;
+  netCtx.fillStyle = '#888';
+  netCtx.font = '9px monospace';
+  netCtx.textAlign = 'center';
+  netCtx.fillText('RELAY CORE', cx, cy + 22);
+
+  // 2. Render proxy node connections
+  netNodes.forEach(n => {
+    n.x += (n.tx - n.x) * 0.06;
+    n.y += (n.ty - n.y) * 0.06;
+
+    // Line from core to node
+    netCtx.beginPath();
+    netCtx.moveTo(cx, cy);
+    netCtx.lineTo(n.x, n.y);
+    netCtx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+    netCtx.lineWidth = 1;
+    netCtx.stroke();
+
+    // Proxy Node Dot
+    netCtx.shadowBlur = 6;
+    netCtx.shadowColor = n.color;
+    netCtx.fillStyle = n.color;
+    netCtx.beginPath();
+    netCtx.arc(n.x, n.y, 4, 0, Math.PI * 2);
+    netCtx.fill();
+    netCtx.shadowBlur = 0;
+
+    // Pulse ring
+    if (n.pulse > 0) {
+      netCtx.beginPath();
+      netCtx.arc(n.x, n.y, 4 + (1 - n.pulse) * 12, 0, Math.PI * 2);
+      netCtx.strokeStyle = n.color;
+      netCtx.lineWidth = n.pulse;
+      netCtx.stroke();
+      n.pulse -= 0.03;
+    }
+  });
+
+  // 3. Render moving traffic particles
+  for (let i = netParticles.length - 1; i >= 0; i--) {
+    const p = netParticles[i];
+    p.progress += p.speed;
+    const px = cx + (p.tx - cx) * p.progress;
+    const py = cy + (p.ty - cy) * p.progress;
+
+    netCtx.shadowBlur = 8;
+    netCtx.shadowColor = p.color;
+    netCtx.fillStyle = p.color;
+    netCtx.beginPath();
+    netCtx.arc(px, py, 2.5, 0, Math.PI * 2);
+    netCtx.fill();
+    netCtx.shadowBlur = 0;
+
+    if (p.progress >= 1) {
+      // Trigger pulse ring on target node
+      const targetNode = netNodes.find(n => Math.abs(n.tx - p.tx) < 5 && Math.abs(n.ty - p.ty) < 5);
+      if (targetNode) targetNode.pulse = 1;
+      netParticles.splice(i, 1);
+    }
+  }
+
+  requestAnimationFrame(animNetworkGraph);
+}
+
 // Initialize page
 window.addEventListener('DOMContentLoaded', () => {
   loadSettings();
   renderGuide();
+  resizeNetCanvas();
+  animNetworkGraph();
+  window.addEventListener('resize', resizeNetCanvas);
   
   setInterval(loadSettings, 4000);
   setInterval(refreshPool, 3000);
