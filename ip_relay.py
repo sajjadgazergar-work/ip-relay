@@ -411,9 +411,16 @@ async def _fetch_sources() -> None:
                     for e in r.json().get("results", []):
                         if not e.get("valid"):
                             continue
-                        addr = f"{e.get('proxy_address')}:{e.get('port')}"
+                        user = e.get("username")
+                        pw = e.get("password")
+                        ip = e.get("proxy_address")
+                        port = e.get("port")
+                        if user and pw:
+                            addr = f"{user}:{pw}@{ip}:{port}"
+                        else:
+                            addr = f"{ip}:{port}"
                         key = f"http://{addr}"
-                        if addr in POOL.lanes or key in POOL.candidates:
+                        if ip in POOL.lanes or addr in POOL.lanes or key in POOL.candidates:
                             continue
                         POOL.candidates[key] = now
                         added += 1
@@ -1007,10 +1014,14 @@ async def api_pool(request: Request):
     if not _check_relay_auth(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     now = time.time()
-    warm = [{"addr": ln.addr, "proto": ln.proto, "score": round(ln.score, 3),
+    
+    def display_addr(a: str) -> str:
+        return a.split("@", 1)[-1] if "@" in a else a
+        
+    warm = [{"addr": display_addr(ln.addr), "proto": ln.proto, "score": round(ln.score, 3),
              "lat_ms": round(ln.lat_ms), "ok": ln.ok, "fails": ln.fails}
             for ln in POOL.warm_lanes()[:50]]
-    parked = [{"addr": ln.addr, "proto": ln.proto, "until_in": int(ln.parked_until - now)}
+    parked = [{"addr": display_addr(ln.addr), "proto": ln.proto, "until_in": int(ln.parked_until - now)}
               for ln in POOL.parked_lanes()[:50]]
     return {"warm": warm, "parked": parked, "queue": len(POOL.candidates)}
 
