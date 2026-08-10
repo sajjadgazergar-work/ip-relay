@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import hmac
 import json
 import logging
@@ -57,10 +58,11 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 
 # ── settings (env as base, settings.json overlays; UI writes the file) ──
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "settings.json")
+LANES_FILE = os.environ.get("LANES_FILE", "lanes.json")
 DEFAULTS = {
     "upstream_base_url": "https://opencode.ai/zen/v1",
     "upstream_api_key": "public",
@@ -69,7 +71,7 @@ DEFAULTS = {
     # egress / pool
     "proxy_pool_target": 30,          # how many confirmed lanes to keep warm
     "proxy_max_candidates": 3000,     # cap candidates held in the reservoir
-    "proxy_test_concurrency": 60,     # concurrent probes
+    "proxy_test_concurrency": 60,     # concurrent probes (ceiling when adaptive)
     "proxy_probe_timeout": 25,        # real-probe timeout (slow proxies OK)
     "relay_proxy_timeout": 40,        # per-attempt upstream timeout via proxy
     "relay_attempts": 6,              # lanes tried per client request (failover)
@@ -78,8 +80,62 @@ DEFAULTS = {
     "direct_lane": False,             # include the server's own IP as a lane
     "webshare_token": "",             # optional Webshare free-tier API token
     "allow_socks": True,              # use SOCKS4/5 sources (needs httpx[socks])
+    # v0.8: capacity + safety
+    "lane_max_inflight": 2,           # concurrent requests allowed per lane
+    "max_lanes_per_subnet": 3,        # /24 diversity cap (0 = unlimited)
+    "adaptive_concurrency": True,     # auto-tune probe concurrency to the link
+    "persist_lanes": True,            # remember scored lanes across restarts
 }
 settings: dict = dict(DEFAULTS)
+
+# Setting bounds enforced at the API boundary (min, max). Anything outside is
+# rejected with a clear error instead of silently clamped, so the operator
+# learns the constraint instead of wondering why their value did nothing.
+SETTING_BOUNDS: dict[str, tuple[int, int]] = {
+    "proxy_pool_target": (1, 500),
+    "proxy_max_candidates": (100, 100000),
+    "proxy_test_concurrency": (1, 500),
+    "proxy_probe_timeout": (5, 120),
+    "relay_proxy_timeout": (10, 300),
+    "relay_attempts": (1, 20),
+    "lane_cooldown_sec": (10, 86400),
+    "lane_recover_sec": (30, 86400),
+    "lane_max_inflight": (1, 32),
+    "max_lanes_per_subnet": (0, 100),
+}
+
+# Named upstream profiles: base URL + probe model in one pick, so a new user
+# does not have to know a provider's quirks to get a working pool.
+PROVIDER_PROFILES: dict[str, dict] = {
+    "opencode-zen": {
+        "label": "OpenCode Zen (free tier)",
+        "upstream_base_url": "https://opencode.ai/zen/v1",
+        "probe_model": "deepseek-v4-flash-free",
+        "upstream_api_key": "public",
+        "note": "Per-IP free tier. Key 'public' is shared and often pre-burned.",
+    },
+    "openrouter-free": {
+        "label": "OpenRouter (:free models)",
+        "upstream_base_url": "https://openrouter.ai/api/v1",
+        "probe_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "upstream_api_key": "",
+        "note": "Needs your own key; free models are rate-limited per IP + key.",
+    },
+    "groq": {
+        "label": "Groq",
+        "upstream_base_url": "https://api.groq.com/openai/v1",
+        "probe_model": "llama-3.3-70b-versatile",
+        "upstream_api_key": "",
+        "note": "Generous free tier, per-key RPM limits.",
+    },
+    "generic-openai": {
+        "label": "Generic OpenAI-compatible",
+        "upstream_base_url": "",
+        "probe_model": "",
+        "upstream_api_key": "",
+        "note": "Any /v1 endpoint exposing /models and /chat/completions.",
+    },
+}
 
 # runtime globals synced by apply_settings()
 UPSTREAM_BASE_URL = DEFAULTS["upstream_base_url"]
@@ -97,6 +153,22 @@ LANE_RECOVER_SEC = DEFAULTS["lane_recover_sec"]
 DIRECT_LANE = DEFAULTS["direct_lane"]
 WEBSHARE_TOKEN = ""
 ALLOW_SOCKS = DEFAULTS["allow_socks"]
+LANE_MAX_INFLIGHT = DEFAULTS["lane_max_inflight"]
+MAX_LANES_PER_SUBNET = DEFAULTS["max_lanes_per_subnet"]
+ADAPTIVE_CONCURRENCY = DEFAULTS["adaptive_concurrency"]
+PERSIST_LANES = DEFAULTS["persist_lanes"]
+
+# Adaptive probe concurrency. A fixed number is wrong on every link: 60 melts
+# an Iranian residential CPE's NAT table (the root cause of the "0 warm
+# proxies" reports) while barely loading a datacenter uplink. Start modest,
+# grow while the link is clean, halve on a connect-error storm.
+ADAPT = {
+    "current": 20,        # concurrency in force right now
+    "min": 5,
+    "last_change": 0.0,
+    "last_reason": "init",
+    "err_ratio": 0.0,
+}
 
 
 def load_settings() -> None:
@@ -117,6 +189,10 @@ def load_settings() -> None:
         "direct_lane": os.environ.get("DIRECT_LANE", "0") in ("1", "true", "yes"),
         "webshare_token": os.environ.get("WEBSHARE_TOKEN", "").strip(),
         "allow_socks": os.environ.get("ALLOW_SOCKS", "1") in ("1", "true", "yes"),
+        "lane_max_inflight": int(os.environ.get("LANE_MAX_INFLIGHT", DEFAULTS["lane_max_inflight"])),
+        "max_lanes_per_subnet": int(os.environ.get("MAX_LANES_PER_SUBNET", DEFAULTS["max_lanes_per_subnet"])),
+        "adaptive_concurrency": os.environ.get("ADAPTIVE_CONCURRENCY", "1") in ("1", "true", "yes"),
+        "persist_lanes": os.environ.get("PERSIST_LANES", "1") in ("1", "true", "yes"),
     }
     try:
         with open(SETTINGS_FILE) as f:
@@ -124,6 +200,19 @@ def load_settings() -> None:
     except Exception:
         pass
     apply_settings(s, persist=False)
+    # Default-deny the control plane: an empty relay key means every /api route
+    # (including POST /api/settings, which can repoint the upstream at an
+    # attacker's collector) is world-open the moment the port is reachable.
+    # Mint one, persist it, and print it once so the operator can copy it.
+    if not RELAY_API_KEY and os.environ.get("RELAY_ALLOW_ANONYMOUS", "0") not in ("1", "true", "yes"):
+        generated = "rly_" + uuid.uuid4().hex
+        apply_settings({"relay_api_key": generated}, persist=True)
+        log.warning("=" * 68)
+        log.warning("SECURITY: no relay_api_key was set — generated one for you:")
+        log.warning("    %s", generated)
+        log.warning("Saved to %s. Use it as the Bearer token from clients and the", SETTINGS_FILE)
+        log.warning("dashboard. Set RELAY_ALLOW_ANONYMOUS=1 to run without auth.")
+        log.warning("=" * 68)
 
 
 def save_settings() -> None:
@@ -139,6 +228,7 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     global POOL_TARGET, MAX_CANDIDATES, TEST_CONCURRENCY, PROBE_TIMEOUT
     global RELAY_PROXY_TIMEOUT, RELAY_ATTEMPTS, LANE_COOLDOWN_SEC, LANE_RECOVER_SEC
     global DIRECT_LANE, WEBSHARE_TOKEN, ALLOW_SOCKS
+    global LANE_MAX_INFLIGHT, MAX_LANES_PER_SUBNET, ADAPTIVE_CONCURRENCY, PERSIST_LANES
     old_base, old_key = UPSTREAM_BASE_URL, UPSTREAM_API_KEY
     for k, v in new.items():
         if k in DEFAULTS:
@@ -158,6 +248,14 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     DIRECT_LANE = bool(settings["direct_lane"])
     WEBSHARE_TOKEN = str(settings["webshare_token"]).strip()
     ALLOW_SOCKS = bool(settings["allow_socks"])
+    LANE_MAX_INFLIGHT = max(1, int(settings["lane_max_inflight"]))
+    MAX_LANES_PER_SUBNET = max(0, int(settings["max_lanes_per_subnet"]))
+    ADAPTIVE_CONCURRENCY = bool(settings["adaptive_concurrency"])
+    PERSIST_LANES = bool(settings["persist_lanes"])
+    if not ADAPTIVE_CONCURRENCY:
+        ADAPT["current"] = TEST_CONCURRENCY
+    else:
+        ADAPT["current"] = min(ADAPT["current"], TEST_CONCURRENCY)
     if UPSTREAM_BASE_URL != old_base or UPSTREAM_API_KEY != old_key:
         _models_cache["updated"] = 0.0
     if persist:
@@ -165,8 +263,52 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     return dict(settings)
 
 
+def validate_settings_payload(body: dict) -> tuple[dict, list[str]]:
+    """Split an incoming settings payload into (accepted updates, errors).
+
+    Masked secrets are skipped (never overwrite a real key with 'abc...'),
+    numeric fields are bounds-checked, and unknown keys are ignored.
+    """
+    updates: dict = {}
+    errors: list[str] = []
+    for k, v in body.items():
+        if k not in DEFAULTS:
+            continue
+        if k in ("upstream_api_key", "relay_api_key", "webshare_token") and isinstance(v, str):
+            if "..." in v or v == "(none)":
+                continue
+        if k in SETTING_BOUNDS:
+            lo, hi = SETTING_BOUNDS[k]
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                errors.append(f"{k}: must be a number")
+                continue
+            if not (lo <= iv <= hi):
+                errors.append(f"{k}: must be between {lo} and {hi} (got {iv})")
+                continue
+            updates[k] = iv
+            continue
+        if isinstance(DEFAULTS[k], bool):
+            updates[k] = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            continue
+        if k == "upstream_base_url" and isinstance(v, str) and v.strip():
+            if not v.strip().lower().startswith(("http://", "https://")):
+                errors.append("upstream_base_url: must start with http:// or https://")
+                continue
+        updates[k] = v
+    return updates, errors
+
+
 def mask_key(k: str) -> str:
     return k[:6] + "..." if k else "(none)"
+
+
+def _display_addr(a: str) -> str:
+    """Never surface proxy credentials: 'user:pass@ip:port' -> 'ip:port'."""
+    if a == "":
+        return "direct"
+    return a.split("@", 1)[-1] if "@" in a else a
 
 
 async def validate_webshare_token(token: str) -> dict:
@@ -231,7 +373,7 @@ LOG_RING = collections.deque(maxlen=600)
 # Proxy credentials (user:pass@host:port) must never reach the log ring:
 # /api/logs is reachable by anyone who can reach the dashboard, and when
 # relay_api_key is empty that is the whole internet. Strip the userinfo part.
-_CRED_RE = re.compile(r"\b[A-Za-z0-9_\-.]{2,64}:[^\s/@]{2,64}@(?=[\w.\-]+:\d{2,5})")
+_CRED_RE = re.compile(r"(?<![\w.\-])[A-Za-z0-9_\-.]{1,64}:[^\s/@]{1,64}@(?=[\w.\-]+:\d{2,5})")
 
 
 def scrub_creds(text: str) -> str:
@@ -241,7 +383,17 @@ def scrub_creds(text: str) -> str:
 class RingHandler(logging.Handler):
     def emit(self, record):
         try:
-            LOG_RING.append(scrub_creds(self.format(record)))
+            line = scrub_creds(self.format(record))
+            LOG_RING.append(line)
+            # Push the line to SSE subscribers so the dashboard log is live
+            # instead of polled. Guarded: logging can happen from a non-async
+            # thread (or before the loop exists), where queue mutation is unsafe.
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            if _subscribers:
+                publish("log", {"line": line})
         except Exception:
             pass
 
@@ -267,7 +419,7 @@ class Lane:
     prefer the highest-scored warm lane. Latency is tracked for ranking."""
     __slots__ = ("addr", "proto", "score", "lat_ms", "ok", "fails",
                  "parked_until", "last_ok", "last_probe", "probe_tries",
-                 "consec_fails")
+                 "consec_fails", "inflight", "_sem", "created")
 
     def __init__(self, addr: str, proto: str):
         self.addr = addr            # "ip:port" or "" for the direct lane
@@ -281,6 +433,44 @@ class Lane:
         self.last_probe = 0.0
         self.probe_tries = 0
         self.consec_fails = 0       # consecutive failures; >=3 self-parks
+        self.inflight = 0           # requests currently in flight on this lane
+        self._sem: asyncio.Semaphore | None = None
+        self.created = time.time()
+
+    # ── capacity ───────────────────────────────────────────────────
+    # Free proxies collapse under parallel load: without a per-lane cap the
+    # whole fleet of concurrent requests stacks onto whichever lane is
+    # currently fastest and burns it. The semaphore is created lazily so Lane
+    # stays constructible outside a running event loop (tests, deserialization).
+    @property
+    def sem(self) -> asyncio.Semaphore:
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(max(1, LANE_MAX_INFLIGHT))
+        return self._sem
+
+    @property
+    def at_capacity(self) -> bool:
+        return self.inflight >= max(1, LANE_MAX_INFLIGHT)
+
+    @property
+    def subnet(self) -> str:
+        """The /24 this lane lives in. Upstream per-IP limits are frequently
+        enforced per-subnet, so /24 is the real unit of pool capacity."""
+        if not self.addr:
+            return "direct"
+        host = self.addr.split("@")[-1].split(":")[0]
+        parts = host.split(".")
+        return ".".join(parts[:3]) if len(parts) == 4 else host
+
+    @property
+    def tier(self) -> str:
+        """fast / medium / slow — used to route streaming requests to lanes
+        where latency is visible to a human."""
+        if not self.lat_ms:
+            return "medium"
+        if self.lat_ms < 1500:
+            return "fast"
+        return "medium" if self.lat_ms < 4000 else "slow"
 
     @property
     def warm(self) -> bool:
@@ -307,7 +497,33 @@ class Lane:
         # Explicit burn OR repeated drops/5xx without 429s (upstream never
         # sends 429) — self-park so broken IPs leave rotation.
         if burn or self.consec_fails >= 3:
+            was_warm = self.parked_until < time.time()
             self.parked_until = time.time() + LANE_COOLDOWN_SEC
+            if was_warm:
+                # transition warm -> parked is the interesting event for the
+                # visualizer; repeated failures on an already-parked lane are not
+                try:
+                    publish("lane_down", {"addr": _display_addr(self.addr), "proto": self.proto,
+                                          "subnet": self.subnet,
+                                          "cooldown_sec": LANE_COOLDOWN_SEC})
+                except Exception:
+                    pass
+
+    # ── persistence ────────────────────────────────────────────────
+    def to_dict(self) -> dict:
+        return {"addr": self.addr, "proto": self.proto, "score": round(self.score, 4),
+                "lat_ms": round(self.lat_ms, 1), "ok": self.ok, "fails": self.fails,
+                "last_ok": round(self.last_ok, 1)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Lane":
+        ln = cls(str(d.get("addr", "")), str(d.get("proto", "http")))
+        ln.score = float(d.get("score", 0.5))
+        ln.lat_ms = float(d.get("lat_ms", 0.0))
+        ln.ok = int(d.get("ok", 0))
+        ln.fails = int(d.get("fails", 0))
+        ln.last_ok = float(d.get("last_ok", 0.0))
+        return ln
 
 
 class Pool:
@@ -329,18 +545,50 @@ class Pool:
         warm.sort(key=lambda ln: (ln.lat_ms if ln.lat_ms else 8000, -ln.score))
         return warm
 
+    def available_lanes(self, tier: str | None = None) -> list[Lane]:
+        """Warm lanes that still have capacity, optionally restricted to a
+        latency tier. This is what the router should use — warm_lanes() alone
+        will happily hand back a lane that already has N requests on it."""
+        lanes = [ln for ln in self.warm_lanes() if not ln.at_capacity]
+        if tier:
+            tiered = [ln for ln in lanes if ln.tier == tier]
+            if tiered:
+                return tiered
+        return lanes
+
     def parked_lanes(self) -> list[Lane]:
         now = time.time()
         return [ln for ln in self.lanes.values() if ln.parked_until >= now]
 
+    def subnet_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for ln in self.lanes.values():
+            if not ln.addr:
+                continue
+            counts[ln.subnet] = counts.get(ln.subnet, 0) + 1
+        return counts
+
+    def subnet_full(self, subnet: str) -> bool:
+        if MAX_LANES_PER_SUBNET <= 0 or subnet == "direct":
+            return False
+        return self.subnet_counts().get(subnet, 0) >= MAX_LANES_PER_SUBNET
+
     def stats(self) -> dict:
         warm = self.warm_lanes()
+        tiers = {"fast": 0, "medium": 0, "slow": 0}
+        for ln in warm:
+            tiers[ln.tier] = tiers.get(ln.tier, 0) + 1
         return {
             "warm": len(warm),
             "parked": len(self.parked_lanes()),
             "queue": len(self.candidates) + len(self.priority_candidates),
             "sources_ok": self.sources_ok,
             "best_latency_ms": warm[0].lat_ms if warm else None,
+            # capacity truth: 30 lanes across 3 subnets behave like 3 lanes
+            "subnets": len({ln.subnet for ln in warm if ln.addr}),
+            "capacity": len(warm) * max(1, LANE_MAX_INFLIGHT),
+            "inflight": sum(ln.inflight for ln in self.lanes.values()),
+            "tiers": tiers,
         }
 
 
@@ -375,6 +623,142 @@ def _note_quota_ok() -> None:
     QUOTA_STATE["exhausted"] = False
     QUOTA_STATE["backoff_sec"] = 90
     QUOTA_STATE["backoff_until"] = 0.0
+
+
+# ══════════════════════════════════════════════════════════════════
+# METRICS — rolling window, so questions like "is p95 worse than an
+# hour ago?" are answerable. Lifetime counters alone cannot do that.
+# ══════════════════════════════════════════════════════════════════
+
+REQ_LOG: collections.deque = collections.deque(maxlen=2000)  # (ts, lane, status, ms, stream)
+
+
+def record_request(lane: str, status: int, ms: float, stream: bool = False) -> None:
+    REQ_LOG.append((time.time(), lane, status, ms, stream))
+
+
+def _pct(sorted_vals: list[float], q: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    idx = min(len(sorted_vals) - 1, max(0, int(round(q * (len(sorted_vals) - 1)))))
+    return sorted_vals[idx]
+
+
+def metrics_window(seconds: int = 300) -> dict:
+    cutoff = time.time() - seconds
+    rows = [r for r in REQ_LOG if r[0] >= cutoff]
+    lat = sorted(r[3] for r in rows if r[2] == 200)
+    ok = sum(1 for r in rows if r[2] == 200)
+    return {
+        "window_sec": seconds,
+        "requests": len(rows),
+        "ok": ok,
+        "errors": len(rows) - ok,
+        "success_rate": round(ok / len(rows), 4) if rows else None,
+        "rpm": round(len(rows) / (seconds / 60.0), 2),
+        "p50_ms": round(_pct(lat, 0.50)),
+        "p95_ms": round(_pct(lat, 0.95)),
+        "p99_ms": round(_pct(lat, 0.99)),
+    }
+
+
+def sparkline_series(buckets: int = 30, bucket_sec: int = 2) -> dict:
+    """Per-bucket request counts and p95 for the dashboard sparklines."""
+    now = time.time()
+    counts = [0] * buckets
+    lats: list[list[float]] = [[] for _ in range(buckets)]
+    for ts, _lane, status, ms, _stream in REQ_LOG:
+        age = now - ts
+        idx = buckets - 1 - int(age // bucket_sec)
+        if 0 <= idx < buckets:
+            counts[idx] += 1
+            if status == 200:
+                lats[idx].append(ms)
+    p95 = [round(_pct(sorted(b), 0.95)) for b in lats]
+    return {"bucket_sec": bucket_sec, "requests": counts, "p95_ms": p95}
+
+
+# ══════════════════════════════════════════════════════════════════
+# EVENT BUS — the dashboard subscribes over SSE instead of polling
+# three endpoints on three different timers.
+# ══════════════════════════════════════════════════════════════════
+
+_subscribers: set[asyncio.Queue] = set()
+EVENT_RING: collections.deque = collections.deque(maxlen=200)
+
+
+def publish(kind: str, data: dict) -> None:
+    """Fan an event out to every live SSE subscriber. Never blocks, never
+    raises: a slow/dead client must not be able to stall the relay."""
+    evt = {"kind": kind, "ts": time.time(), **data}
+    EVENT_RING.append(evt)
+    for q in list(_subscribers):
+        try:
+            q.put_nowait(evt)
+        except asyncio.QueueFull:
+            pass
+        except Exception:
+            _subscribers.discard(q)
+
+
+# ══════════════════════════════════════════════════════════════════
+# LANE PERSISTENCE — the scored pool is the most expensive asset the
+# process owns; losing it on every restart is a self-inflicted outage.
+# ══════════════════════════════════════════════════════════════════
+
+def save_lanes() -> int:
+    if not PERSIST_LANES:
+        return 0
+    keep = [ln.to_dict() for ln in POOL.lanes.values() if ln.addr and ln.score > 0.25]
+    try:
+        tmp = LANES_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"saved": time.time(), "lanes": keep}, f)
+        os.replace(tmp, LANES_FILE)   # atomic: never leave a torn file behind
+        return len(keep)
+    except Exception as e:
+        log.warning("could not save lanes: %s", e)
+        return 0
+
+
+def load_lanes() -> int:
+    """Re-seed remembered lanes as PRIORITY candidates (not straight into the
+    pool): they still have to prove themselves, they just skip the queue."""
+    if not PERSIST_LANES:
+        return 0
+    try:
+        with open(LANES_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return 0
+    age = time.time() - float(data.get("saved", 0))
+    if age > 86400:
+        log.info("lanes.json is %.1fh old — ignoring stale egress state", age / 3600)
+        return 0
+    n = 0
+    now = time.time()
+    for d in data.get("lanes", []):
+        try:
+            ln = Lane.from_dict(d)
+        except Exception:
+            continue
+        if not ln.addr or ln.score <= 0.25:
+            continue
+        POOL.priority_candidates[f"{ln.proto}://{ln.addr}"] = now
+        n += 1
+    if n:
+        log.info("restored %d remembered lanes into the priority queue (%.0fs old)", n, age)
+    return n
+
+
+async def lane_persist_loop() -> None:
+    while True:
+        await asyncio.sleep(30)
+        try:
+            save_lanes()
+        except Exception as e:
+            log.warning("lane persist loop error: %s", e)
+
 
 # ── proxy sources ─────────────────────────────────────────────────
 # Each entry: (url, kind). kind "text" = ip:port lines (assumed proto).
@@ -576,6 +960,7 @@ async def _probe_candidate(key: str) -> Lane | None:
         # Stage 1: Fast connectivity screening (max 4 seconds)
         async with httpx.AsyncClient(proxy=proxy_url, timeout=4, verify=False) as c:
             if not await _screen(c):
+                _LAST_PROBE_ERR[key] = "conn"
                 return None
 
         # Stage 2: Full upstream completions check
@@ -596,11 +981,11 @@ async def _probe_candidate(key: str) -> Lane | None:
                         ln.mark_fail(burn=True)
                         ln.last_probe = time.time()
                         log.warning("Prober: Lane %s passed, but latency was too slow (%dms > limit %dms)",
-                                    addr, int(lat), int(cutoff))
+                                    _display_addr(addr), int(lat), int(cutoff))
                         return ln
                     ln = Lane(addr, proto)
                     ln.mark_ok(lat)
-                    log.info("Prober: +Lane %s passed completion test (%dms)", addr, int(lat))
+                    log.info("Prober: +Lane %s passed completion test (%dms)", _display_addr(addr), int(lat))
                     STATS["probes_ok"] += 1
                     return ln
                 elif r.status_code == 429 and is_quota_429(r.content, 429):
@@ -609,15 +994,18 @@ async def _probe_candidate(key: str) -> Lane | None:
                     # pauses probing until the window resets.
                     _note_upstream_429()
                     STATS["probes_burned"] += 1
-                    log.info("Prober: Lane %s rate-limited (429) — key quota exhausted, probing paused", addr)
+                    log.info("Prober: Lane %s rate-limited (429) — key quota exhausted, probing paused", _display_addr(addr))
                     return None
                 else:
+                    _LAST_PROBE_ERR[key] = "http"
                     log.warning("Prober: Lane %s failed Stage 2: HTTP %d (Response: %s)",
-                                addr, r.status_code, r.text[:100].strip())
+                                _display_addr(addr), r.status_code, r.text[:100].strip())
         except Exception as e:
-            log.warning("Prober: Lane %s failed Stage 2 connection: %s", addr, type(e).__name__)
+            _LAST_PROBE_ERR[key] = "conn"
+            log.warning("Prober: Lane %s failed Stage 2 connection: %s", _display_addr(addr), type(e).__name__)
     except Exception as e:
-        log.warning("Prober: Lane %s failed Stage 1 setup: %s", addr, type(e).__name__)
+        _LAST_PROBE_ERR[key] = "conn"
+        log.warning("Prober: Lane %s failed Stage 1 setup: %s", _display_addr(addr), type(e).__name__)
     return None
 
 
@@ -625,43 +1013,81 @@ async def _churn_batch() -> None:
     """Test a batch of candidates, promoting the good into the pool."""
     if not POOL.candidates and not POOL.priority_candidates:
         return
-    
+
+    conc = ADAPT["current"] if ADAPTIVE_CONCURRENCY else TEST_CONCURRENCY
+    conc = max(1, min(conc, TEST_CONCURRENCY))
+
     # Cap the batch: huge batches stall the manager loop for minutes and burn
     # upstream quota on hundreds of Stage-2 probes; smaller batches keep the
     # cadence tight and the key's budget intact.
-    batch_size = min(TEST_CONCURRENCY * 8, 300)
+    batch_size = min(conc * 8, 300)
     batch = []
-    
+
     # 1. Pop from priority queue first
     while POOL.priority_candidates and len(batch) < batch_size:
         k = next(iter(POOL.priority_candidates.keys()))
         POOL.priority_candidates.pop(k, None)
         batch.append(k)
-        
-    # 2. Fill remainder from standard queue
-    while POOL.candidates and len(batch) < batch_size:
-        k = next(iter(POOL.candidates.keys()))
-        POOL.candidates.pop(k, None)
-        batch.append(k)
-        
+
+    # 2. Fill remainder from standard queue, preferring unseen /24s so the pool
+    #    spreads across subnets instead of stacking 20 ports of one host.
+    if POOL.candidates and len(batch) < batch_size:
+        seen_subnets = set(POOL.subnet_counts().keys())
+        deferred: list[str] = []
+        for k in list(POOL.candidates.keys()):
+            if len(batch) >= batch_size:
+                break
+            POOL.candidates.pop(k, None)
+            sub = _key_subnet(k)
+            if MAX_LANES_PER_SUBNET > 0 and POOL.subnet_full(sub):
+                POOL.tried[k] = time.time()   # subnet already saturated
+                continue
+            if sub in seen_subnets and len(deferred) < batch_size:
+                deferred.append(k)            # try fresh subnets first
+                continue
+            seen_subnets.add(sub)
+            batch.append(k)
+        for k in deferred:
+            if len(batch) >= batch_size:
+                POOL.candidates[k] = time.time()   # put back, try next round
+            else:
+                batch.append(k)
+
     if not batch:
         return
-        
+
     STATS["candidates_tested"] += len(batch)
-    log.info("Prober: Testing %d candidate proxies (concurrency=%d)...", len(batch), TEST_CONCURRENCY)
-    sem = asyncio.Semaphore(TEST_CONCURRENCY)
+    log.info("Prober: Testing %d candidate proxies (concurrency=%d%s)...",
+             len(batch), conc, ", adaptive" if ADAPTIVE_CONCURRENCY else "")
+    publish("churn_start", {"batch": len(batch), "concurrency": conc})
+    sem = asyncio.Semaphore(conc)
+    conn_errors = 0
+    completed = 0
 
     async def guarded(k):
+        nonlocal conn_errors, completed
         async with sem:
             try:
                 res = await _probe_candidate(k)
+                completed += 1
                 if isinstance(res, Lane):
+                    if res.addr and POOL.subnet_full(res.subnet) and f"{res.proto}://{res.addr}" not in POOL.lanes:
+                        POOL.tried[k] = time.time()
+                        return
                     POOL.lanes[f"{res.proto}://{res.addr}"] = res
                     if res.warm:
-                        log.info("churn: promoted new warm lane: %s (score=%.2f, lat=%dms)", res.addr, res.score, int(res.lat_ms))
+                        log.info("churn: promoted new warm lane: %s (score=%.2f, lat=%dms, %s)",
+                                 res.addr, res.score, int(res.lat_ms), res.tier)
+                        publish("lane_up", {"addr": _display_addr(res.addr), "proto": res.proto,
+                                            "lat_ms": round(res.lat_ms), "tier": res.tier,
+                                            "subnet": res.subnet})
                 else:
                     POOL.tried[k] = time.time()
+                    if _LAST_PROBE_ERR.get(k) == "conn":
+                        conn_errors += 1
+                    _LAST_PROBE_ERR.pop(k, None)
             except Exception:
+                completed += 1
                 POOL.tried[k] = time.time()
 
     try:
@@ -673,8 +1099,55 @@ async def _churn_batch() -> None:
         for k in abandoned:
             POOL.tried[k] = time.time()
         log.warning("churn: batch timed out after 90s; %d candidates abandoned as tried", len(abandoned))
-    log.info("churn: batch completed. Pool stats: warm=%d, parked=%d, queue=%d",
-             len(POOL.warm_lanes()), len(POOL.parked_lanes()), len(POOL.candidates) + len(POOL.priority_candidates))
+
+    _adapt_concurrency(conn_errors, max(1, completed))
+    s = POOL.stats()
+    log.info("churn: batch completed. Pool stats: warm=%d, parked=%d, queue=%d, subnets=%d",
+             s["warm"], s["parked"], s["queue"], s["subnets"])
+    publish("churn_done", {"pool": s})
+
+
+def _key_subnet(key: str) -> str:
+    """/24 of a 'proto://[user:pass@]ip:port' candidate key."""
+    addr = key.split("://", 1)[-1]
+    host = addr.split("@")[-1].split(":")[0]
+    parts = host.split(".")
+    return ".".join(parts[:3]) if len(parts) == 4 else host
+
+
+# Tracks why the last probe of a candidate failed, so the adaptive controller
+# can tell "the link is saturated" (connect errors) from "these proxies are
+# simply dead" (HTTP errors). Only connect storms should shrink concurrency.
+_LAST_PROBE_ERR: dict[str, str] = {}
+
+
+def _adapt_concurrency(conn_errors: int, completed: int) -> None:
+    """Halve on a connect-error storm, grow 25% while the link is clean.
+
+    This is the durable fix for the residential-NAT collapse: a fixed 60 melts
+    an Iranian CPE's connection table, and the operator has no way to know that
+    is what happened. The daemon now finds its own ceiling and logs every move.
+    """
+    if not ADAPTIVE_CONCURRENCY:
+        return
+    ratio = conn_errors / completed
+    ADAPT["err_ratio"] = round(ratio, 3)
+    cur = ADAPT["current"]
+    if ratio > 0.4 and cur > ADAPT["min"]:
+        new = max(ADAPT["min"], cur // 2)
+        reason = f"connect-error storm {ratio:.0%} — link/NAT saturated"
+    elif ratio < 0.1 and cur < TEST_CONCURRENCY:
+        new = min(TEST_CONCURRENCY, max(cur + 1, int(cur * 1.25)))
+        reason = f"link clean ({ratio:.0%} connect errors) — scaling up"
+    else:
+        return
+    if new == cur:
+        return
+    ADAPT["current"] = new
+    ADAPT["last_change"] = time.time()
+    ADAPT["last_reason"] = reason
+    log.info("adaptive concurrency: %d → %d (%s)", cur, new, reason)
+    publish("adapt", {"from": cur, "to": new, "reason": reason, "err_ratio": ADAPT["err_ratio"]})
 
 
 async def _recover_parked() -> None:
@@ -709,7 +1182,10 @@ async def _recover_parked() -> None:
                         _note_quota_ok()
                         ln.mark_ok((time.time() - t0) * 1000)
                         ln.probe_tries = 0
-                        log.info("lane recovered: %s", ln.addr)
+                        log.info("lane recovered: %s", _display_addr(ln.addr))
+                        publish("lane_up", {"addr": _display_addr(ln.addr), "proto": ln.proto,
+                                            "lat_ms": round(ln.lat_ms), "tier": ln.tier,
+                                            "subnet": ln.subnet, "recovered": True})
                     else:
                         ln.probe_tries += 1
             except Exception:
@@ -875,7 +1351,7 @@ async def _attempt(lane: Lane, payload: dict, path: str, headers: dict, timeout:
             else:
                 # 200 but garbage — echo proxy / captive portal / MITM. Burn it.
                 lane.mark_fail(burn=True)
-                log.info("lane %s returned 200 with non-completion body — burned", lane.addr)
+                log.info("lane %s returned 200 with non-completion body — burned", _display_addr(lane.addr))
                 return 502, {"content-type": "application/json"}, json.dumps(
                     {"error": {"message": "lane returned invalid body", "type": "lane_invalid"}}).encode()
         elif resp.status_code == 429 and is_quota_429(body, 429):
@@ -916,9 +1392,15 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
     deadline = time.time() + timeout
     last_err: tuple | None = None
     tried: set[str] = set()
+    t_start = time.time()
 
     for i in range(attempts):
-        lanes = [ln for ln in POOL.warm_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
+        # available_lanes() respects the per-lane in-flight cap so concurrent
+        # requests spread out instead of stacking onto the fastest lane and
+        # burning it — free proxies collapse under parallel load.
+        lanes = [ln for ln in POOL.available_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
+        if not lanes:
+            lanes = [ln for ln in POOL.warm_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
         if not lanes:
             # Fallback to parked lanes if no warm lanes are available
             lanes = [ln for ln in POOL.parked_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
@@ -928,9 +1410,18 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
         lane = _pick_lane(lanes) if i == 0 else lanes[0]
         tried.add(f"{lane.proto}://{lane.addr}")
         try:
-            status, resp_headers, body = await _attempt(lane, payload, path, headers, min(timeout, RELAY_PROXY_TIMEOUT))
+            async with lane.sem:
+                lane.inflight += 1
+                try:
+                    status, resp_headers, body = await _attempt(lane, payload, path, headers, min(timeout, RELAY_PROXY_TIMEOUT))
+                finally:
+                    lane.inflight -= 1
             if status == 200:
                 _note_quota_ok()
+                ms = (time.time() - t_start) * 1000
+                record_request(_display_addr(lane.addr), 200, ms, stream)
+                publish("request", {"lane": _display_addr(lane.addr), "status": 200,
+                                    "ms": round(ms), "attempt": i + 1, "tier": lane.tier})
                 return status, resp_headers, body
             if status == 429 and is_quota_429(body, 429):
                 # key-global rate limit — don't burn the lane; fail over, and
@@ -983,9 +1474,15 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
             continue
 
     if last_err and last_err[0] == 429:
+        record_request("-", 429, (time.time() - t_start) * 1000, stream)
+        publish("request", {"lane": "-", "status": 429, "ms": round((time.time() - t_start) * 1000)})
         return 429, {"content-type": "application/json"}, last_err[1]
     if last_err and isinstance(last_err[0], int) and last_err[0] >= 500:
+        record_request("-", last_err[0], (time.time() - t_start) * 1000, stream)
+        publish("request", {"lane": "-", "status": last_err[0], "ms": round((time.time() - t_start) * 1000)})
         return last_err[0], {"content-type": "application/json"}, last_err[1]
+    record_request("-", 503, (time.time() - t_start) * 1000, stream)
+    publish("request", {"lane": "-", "status": 503, "ms": round((time.time() - t_start) * 1000)})
     return 503, {"content-type": "application/json"}, json.dumps(
         {"error": {"message": "all egress lanes busy or failed — pool is refilling, retry shortly", "type": "rotator_exhausted"}}
     ).encode()
@@ -1004,9 +1501,15 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
     deadline = time.time() + timeout
     last_err: tuple | None = None
     tried: set[str] = set()
+    t_start = time.time()
 
     for i in range(attempts):
-        lanes = [ln for ln in POOL.warm_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
+        # Streaming is where latency is visible to a human, so prefer the fast
+        # tier; available_lanes() falls back to any capacity-free lane when no
+        # fast lane exists.
+        lanes = [ln for ln in POOL.available_lanes(tier="fast") if f"{ln.proto}://{ln.addr}" not in tried]
+        if not lanes:
+            lanes = [ln for ln in POOL.warm_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
         if not lanes:
             # Fallback to parked lanes if no warm lanes are available
             lanes = [ln for ln in POOL.parked_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
@@ -1042,7 +1545,7 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                 if first is None or not _looks_like_completion(first):
                     lane.mark_fail(burn=True)
                     STATS["lane_failures"] += 1
-                    log.info("lane %s returned 200 with non-completion stream — burned", lane.addr)
+                    log.info("lane %s returned 200 with non-completion stream — burned", _display_addr(lane.addr))
                     await resp.aclose()
                     await client.aclose()
                     continue
@@ -1050,6 +1553,14 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                 _note_quota_ok()
                 STATS["streams"] += 1
                 owned_resp, owned_client = resp, client
+                # A stream occupies the lane for its whole lifetime, not just
+                # the handshake — count it in-flight until the generator closes.
+                lane.inflight += 1
+                ms_ttfb = (time.time() - t_start) * 1000
+                record_request(_display_addr(lane.addr), 200, ms_ttfb, True)
+                publish("request", {"lane": _display_addr(lane.addr), "status": 200,
+                                    "ms": round(ms_ttfb), "attempt": i + 1,
+                                    "tier": lane.tier, "stream": True})
 
                 async def chunks():
                     try:
@@ -1057,9 +1568,10 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                         async for chunk in aiter:
                             yield chunk
                     except Exception as e:
-                        log.warning("stream on lane %s interrupted mid-stream: %s", lane.addr, repr(e))
+                        log.warning("stream on lane %s interrupted mid-stream: %s", _display_addr(lane.addr), repr(e))
                         yield b'data: {"error":{"message":"upstream stream interrupted","type":"stream_interrupted"}}\n\n'
                     finally:
+                        lane.inflight = max(0, lane.inflight - 1)
                         await owned_resp.aclose()
                         await owned_client.aclose()
 
@@ -1145,11 +1657,24 @@ def build_upstream_headers(request: Request) -> dict:
     return h
 
 
-def _check_relay_auth(request: Request) -> bool:
+def _check_relay_auth(request: Request, allow_query: bool = False) -> bool:
+    """Constant-time relay-key check.
+
+    allow_query exists only for /api/events: the browser EventSource API cannot
+    set an Authorization header, so the key has to ride in the URL there. It is
+    deliberately opt-in per endpoint — a key in a query string can land in
+    access logs and Referer headers, so no other route accepts it.
+    """
     if not RELAY_API_KEY:
         return True
     auth = request.headers.get("authorization", "")
-    return hmac.compare_digest(auth, f"Bearer {RELAY_API_KEY}") or hmac.compare_digest(auth, RELAY_API_KEY)
+    if hmac.compare_digest(auth, f"Bearer {RELAY_API_KEY}") or hmac.compare_digest(auth, RELAY_API_KEY):
+        return True
+    if allow_query:
+        qk = request.query_params.get("key", "")
+        if qk and hmac.compare_digest(qk, RELAY_API_KEY):
+            return True
+    return False
 
 
 # ── model resolution (Claude Code tier aliases -> real upstream model) ──
@@ -1163,6 +1688,10 @@ _models_retry_at = 0.0   # outage backoff: don't hammer upstream every call
 
 
 async def get_models_cached() -> tuple[int, str, bytes]:
+    # _models_retry_at is assigned below, so it MUST be declared global —
+    # without this the very first read raises UnboundLocalError and every
+    # models fetch fails (silently, because callers wrap this in try/except).
+    global _models_retry_at
     now = time.time()
     if now < _models_retry_at:
         # outage backoff: serve the stale body (or 503) without hammering
@@ -1441,34 +1970,98 @@ def openai_sse_to_anthropic(body: bytes, model: str) -> bytes:
 # ROUTES
 # ══════════════════════════════════════════════════════════════════
 
-@app.on_event("startup")
-async def startup():
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Modern FastAPI lifespan: startup work, then graceful shutdown.
+
+    Replaces the deprecated @app.on_event hooks and, unlike them, guarantees
+    the pool is persisted even when the process is asked to stop mid-churn.
+    """
     load_settings()
-    
+
     # 1. SOCKS library validation
     try:
-        import socksio
+        import socksio  # noqa: F401
     except ImportError:
         log.error("CRITICAL ERROR: SOCKS proxy support is missing! SOCKS4/5 proxies will be ignored. "
                   "Please run: pip install 'httpx[socks]' to install SOCKS dependencies.")
 
-    asyncio.create_task(pool_manager())
-    
-    # 2. Direct validation check against the Upstream on startup
-    async def verify_upstream():
-        try:
-            status, _, body = await get_models_cached()
-            if status == 200:
-                log.info("Upstream verification: Upstream base URL and API key are VALID.")
-            else:
-                log.error("CRITICAL Upstream verification FAILED (HTTP %d). "
-                          "Your configured UPSTREAM_BASE_URL ('%s') or UPSTREAM_API_KEY might be invalid. "
-                          "Response: %s", status, UPSTREAM_BASE_URL, body[:150].decode('utf-8', errors='ignore'))
-        except Exception as e:
-            log.error("CRITICAL Upstream connection FAILED: Could not reach upstream on startup: %s. "
-                      "Verify your network or UPSTREAM_BASE_URL ('%s').", e, UPSTREAM_BASE_URL)
+    # 2. Configuration sanity — surface misconfiguration at boot instead of
+    #    letting the operator discover it as "0 warm proxies" an hour later.
+    for line in config_warnings():
+        log.warning("CONFIG: %s", line)
 
-    asyncio.create_task(verify_upstream())
+    # 3. Re-seed remembered lanes so a restart is not a cold start
+    restored = load_lanes()
+    if restored:
+        log.info("warm-start: %d remembered lanes queued for fast revalidation", restored)
+
+    # Background workers are skipped when IP_RELAY_NO_BACKGROUND=1 so tests (and
+    # anyone importing the app for inspection) don't start scraping the internet.
+    tasks: list[asyncio.Task] = []
+    if os.environ.get("IP_RELAY_NO_BACKGROUND", "0") not in ("1", "true", "yes"):
+        tasks = [asyncio.create_task(pool_manager()),
+                 asyncio.create_task(lane_persist_loop())]
+
+        # 4. Direct validation check against the Upstream on startup
+        async def verify_upstream():
+            try:
+                status, _, body = await get_models_cached()
+                if status == 200:
+                    log.info("Upstream verification: Upstream base URL and API key are VALID.")
+                else:
+                    log.error("CRITICAL Upstream verification FAILED (HTTP %d). "
+                              "Your configured UPSTREAM_BASE_URL ('%s') or UPSTREAM_API_KEY might be invalid. "
+                              "Response: %s", status, UPSTREAM_BASE_URL, body[:150].decode('utf-8', errors='ignore'))
+            except Exception as e:
+                log.error("CRITICAL Upstream connection FAILED: Could not reach upstream on startup: %s. "
+                          "Verify your network or UPSTREAM_BASE_URL ('%s').", e, UPSTREAM_BASE_URL)
+
+        tasks.append(asyncio.create_task(verify_upstream()))
+
+    try:
+        yield
+    finally:
+        n = save_lanes()
+        if n:
+            log.info("shutdown: persisted %d lanes to %s", n, LANES_FILE)
+        for t in tasks:
+            t.cancel()
+
+
+app.router.lifespan_context = lifespan
+
+
+def config_warnings() -> list[str]:
+    """Human-readable configuration problems. Returned by /api/diagnostics and
+    logged at startup — misconfiguration should never be silent."""
+    out: list[str] = []
+    if not UPSTREAM_BASE_URL:
+        out.append("upstream_base_url is empty — no upstream to relay to.")
+    elif not UPSTREAM_BASE_URL.startswith(("http://", "https://")):
+        out.append(f"upstream_base_url ('{UPSTREAM_BASE_URL}') has no http(s):// scheme.")
+    if UPSTREAM_API_KEY == "public":
+        out.append("upstream_api_key is the shared literal 'public' — it is globally "
+                   "rate-limited and usually pre-burned. Expect widespread 429s.")
+    if not PROBE_MODEL:
+        out.append("probe_model is empty — lanes cannot be verified with a real completion.")
+    if not RELAY_API_KEY:
+        out.append("relay_api_key is empty — the control plane and /v1 are UNAUTHENTICATED. "
+                   "Anyone who can reach this port can read your proxy pool and repoint the upstream.")
+    try:
+        import socksio  # noqa: F401
+    except ImportError:
+        if ALLOW_SOCKS:
+            out.append("allow_socks is on but socksio is not installed — every SOCKS "
+                       "candidate will fail. Install with: pip install 'httpx[socks]'")
+    if TEST_CONCURRENCY > 40:
+        out.append(f"proxy_test_concurrency is {TEST_CONCURRENCY}: on a residential/CPE link this "
+                   "saturates the NAT table and every probe fails with connect errors. "
+                   "15–25 is the safe range (adaptive concurrency will also back off on its own).")
+    if LANE_MAX_INFLIGHT > 4:
+        out.append(f"lane_max_inflight is {LANE_MAX_INFLIGHT}: free proxies typically survive "
+                   "1–2 concurrent requests before dropping.")
+    return out
 
 
 @app.get("/healthz")
@@ -1477,13 +2070,190 @@ async def healthz():
     return {"ok": s["warm"] > 0, "version": VERSION, **s}
 
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus text exposition. Unauthenticated on purpose: it contains no
+    credentials and no proxy addresses, and scrapers rarely carry bearer
+    tokens. Bind to localhost or firewall the port if that is not acceptable."""
+    s = POOL.stats()
+    m5 = metrics_window(300)
+    lines = [
+        "# HELP iprelay_warm_lanes Warm egress lanes",
+        "# TYPE iprelay_warm_lanes gauge",
+        f"iprelay_warm_lanes {s['warm']}",
+        "# HELP iprelay_parked_lanes Parked (cooling down) lanes",
+        "# TYPE iprelay_parked_lanes gauge",
+        f"iprelay_parked_lanes {s['parked']}",
+        "# HELP iprelay_unique_subnets Distinct /24s among warm lanes",
+        "# TYPE iprelay_unique_subnets gauge",
+        f"iprelay_unique_subnets {s['subnets']}",
+        "# HELP iprelay_capacity Concurrent requests the pool can absorb",
+        "# TYPE iprelay_capacity gauge",
+        f"iprelay_capacity {s['capacity']}",
+        "# HELP iprelay_inflight Requests currently in flight",
+        "# TYPE iprelay_inflight gauge",
+        f"iprelay_inflight {s['inflight']}",
+        "# HELP iprelay_candidate_queue Candidates awaiting probe",
+        "# TYPE iprelay_candidate_queue gauge",
+        f"iprelay_candidate_queue {s['queue']}",
+        "# HELP iprelay_probe_concurrency Probe concurrency currently in force",
+        "# TYPE iprelay_probe_concurrency gauge",
+        f"iprelay_probe_concurrency {ADAPT['current']}",
+        "# HELP iprelay_requests_total Client requests served",
+        "# TYPE iprelay_requests_total counter",
+        f"iprelay_requests_total {STATS['requests']}",
+        "# HELP iprelay_failovers_total Lane failovers inside client requests",
+        "# TYPE iprelay_failovers_total counter",
+        f"iprelay_failovers_total {STATS['failovers']}",
+        "# HELP iprelay_lane_failures_total Lane-level failures",
+        "# TYPE iprelay_lane_failures_total counter",
+        f"iprelay_lane_failures_total {STATS['lane_failures']}",
+        "# HELP iprelay_upstream_429_total Key-global rate-limit responses",
+        "# TYPE iprelay_upstream_429_total counter",
+        f"iprelay_upstream_429_total {STATS['upstream_429s']}",
+        "# HELP iprelay_probes_ok_total Candidates that passed verification",
+        "# TYPE iprelay_probes_ok_total counter",
+        f"iprelay_probes_ok_total {STATS['probes_ok']}",
+        "# HELP iprelay_latency_p95_ms 95th percentile latency, 5m window",
+        "# TYPE iprelay_latency_p95_ms gauge",
+        f"iprelay_latency_p95_ms {m5['p95_ms']}",
+        "# HELP iprelay_quota_exhausted Upstream key quota exhausted (1/0)",
+        "# TYPE iprelay_quota_exhausted gauge",
+        f"iprelay_quota_exhausted {1 if QUOTA_STATE['exhausted'] else 0}",
+    ]
+    return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+@app.get("/api/metrics")
+async def api_metrics(request: Request):
+    if not _check_relay_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return {"w60": metrics_window(60), "w300": metrics_window(300),
+            "w3600": metrics_window(3600), "spark": sparkline_series(),
+            "adaptive": ADAPT}
+
+
+@app.get("/api/diagnostics")
+async def api_diagnostics(request: Request):
+    """Everything needed to answer "why do I have 0 warm lanes?" in one call:
+    config problems, probe-failure breakdown, and a plain-language verdict."""
+    if not _check_relay_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    s = POOL.stats()
+    reasons: dict[str, int] = {}
+    for line in list(LOG_RING)[-400:]:
+        if "failed Stage 2 connection" in line or "failed Stage 1" in line:
+            reasons["connect_error"] = reasons.get("connect_error", 0) + 1
+        elif "failed Stage 2: HTTP 401" in line:
+            reasons["http_401_bad_key"] = reasons.get("http_401_bad_key", 0) + 1
+        elif "failed Stage 2: HTTP 403" in line:
+            reasons["http_403_blocked"] = reasons.get("http_403_blocked", 0) + 1
+        elif "failed Stage 2: HTTP 407" in line:
+            reasons["http_407_proxy_auth"] = reasons.get("http_407_proxy_auth", 0) + 1
+        elif "failed Stage 2: HTTP" in line:
+            reasons["http_other"] = reasons.get("http_other", 0) + 1
+        elif "rate-limited (429)" in line:
+            reasons["upstream_429"] = reasons.get("upstream_429", 0) + 1
+        elif "latency was too slow" in line:
+            reasons["too_slow"] = reasons.get("too_slow", 0) + 1
+
+    verdict = "healthy"
+    advice = "Pool is serving traffic."
+    if s["warm"] == 0:
+        top = max(reasons, key=lambda k: reasons[k]) if reasons else None
+        if top == "connect_error":
+            verdict = "egress_blocked"
+            advice = ("Probes cannot open outbound connections to proxy ports. A VPN, firewall, "
+                      "or ISP filter is blocking non-80/443 traffic, or the link's NAT table is "
+                      "saturated. Lower proxy_test_concurrency (15–25) and retry without the VPN.")
+        elif top == "http_401_bad_key":
+            verdict = "bad_upstream_key"
+            advice = "The upstream rejects the API key (401). Fix upstream_api_key."
+        elif top == "http_403_blocked":
+            verdict = "upstream_blocks_proxies"
+            advice = "The upstream 403s these egress IPs (datacenter/VPN ranges are often blocked)."
+        elif top == "upstream_429":
+            verdict = "quota_exhausted"
+            advice = "The key's own quota is exhausted; every IP 429s. Use a private key."
+        elif not reasons:
+            verdict = "warming_up"
+            advice = "No probe results yet — the pool is still fetching and testing candidates."
+        else:
+            verdict = "no_usable_proxies"
+            advice = "Candidates connect but fail verification. Check the reason breakdown."
+    elif QUOTA_STATE["exhausted"]:
+        verdict = "quota_exhausted"
+        advice = "Lanes are alive but the upstream key's quota is exhausted; probing is paused."
+    return {
+        "verdict": verdict, "advice": advice,
+        "config_warnings": config_warnings(),
+        "probe_failures": reasons,
+        "pool": s,
+        "adaptive": ADAPT,
+        "quota": {"exhausted": QUOTA_STATE["exhausted"],
+                  "resumes_in": max(0, int(QUOTA_STATE["backoff_until"] - time.time()))},
+        "socks_available": _socks_available(),
+        "persisted_lanes": os.path.exists(LANES_FILE),
+    }
+
+
+def _socks_available() -> bool:
+    try:
+        import socksio  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@app.get("/api/profiles")
+async def api_profiles(request: Request):
+    if not _check_relay_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return {"profiles": [{"id": k, **v} for k, v in PROVIDER_PROFILES.items()]}
+
+
+@app.get("/api/events")
+async def api_events(request: Request):
+    """Server-sent events: lane_up / lane_down / request / churn / adapt.
+
+    Replaces three independent polling loops in the dashboard. Each subscriber
+    gets a bounded queue — a stalled browser tab drops events instead of
+    applying backpressure to the relay.
+    """
+    if not _check_relay_auth(request, allow_query=True):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    q: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _subscribers.add(q)
+
+    async def gen():
+        try:
+            yield f"data: {json.dumps({'kind': 'hello', 'ts': time.time(), 'pool': POOL.stats(), 'version': VERSION})}\n\n"
+            while True:
+                try:
+                    evt = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {json.dumps(evt)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"   # keep proxies from closing the stream
+        except asyncio.CancelledError:
+            raise
+        finally:
+            _subscribers.discard(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.get("/api/stats")
 async def api_stats(request: Request):
     if not _check_relay_auth(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     s = POOL.stats()
     return {"version": VERSION, "uptime_sec": int(time.time() - STATS["started"]),
-            "pool": s, "stats": STATS, "settings": public_settings()}
+            "pool": s, "stats": STATS, "settings": public_settings(),
+            "adaptive": ADAPT, "metrics": metrics_window(300),
+            "quota": {"exhausted": QUOTA_STATE["exhausted"],
+                      "resumes_in": max(0, int(QUOTA_STATE["backoff_until"] - time.time()))}}
 
 
 @app.get("/api/pool")
@@ -1491,24 +2261,31 @@ async def api_pool(request: Request):
     if not _check_relay_auth(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     now = time.time()
-    
-    def display_addr(a: str) -> str:
-        if a == "":
-            return "direct"
-        return a.split("@", 1)[-1] if "@" in a else a
-        
+    try:
+        limit = max(1, min(200, int(request.query_params.get("limit", 50))))
+        offset = max(0, int(request.query_params.get("offset", 0)))
+    except ValueError:
+        limit, offset = 50, 0
+
     all_warm = POOL.warm_lanes()
     all_parked = POOL.parked_lanes()
-    warm = [{"addr": display_addr(ln.addr), "proto": ln.proto, "score": round(ln.score, 3),
+    warm = [{"addr": _display_addr(ln.addr), "proto": ln.proto, "score": round(ln.score, 3),
              "lat_ms": round(ln.lat_ms), "ok": ln.ok, "fails": ln.fails,
+             "tier": ln.tier, "subnet": ln.subnet, "inflight": ln.inflight,
+             "capacity": max(1, LANE_MAX_INFLIGHT),
+             "age_sec": int(now - ln.created),
              "last_ok_ago": int(now - ln.last_ok) if ln.last_ok else -1}
-            for ln in all_warm[:50]]
-    parked = [{"addr": display_addr(ln.addr), "proto": ln.proto, "until_in": int(ln.parked_until - now),
+            for ln in all_warm[offset:offset + limit]]
+    parked = [{"addr": _display_addr(ln.addr), "proto": ln.proto, "until_in": int(ln.parked_until - now),
+               "subnet": ln.subnet, "score": round(ln.score, 3), "fails": ln.fails,
+               "probe_tries": ln.probe_tries,
                "last_probe_ago": int(now - ln.last_probe) if ln.last_probe else -1}
-              for ln in all_parked[:50]]
+              for ln in all_parked[offset:offset + limit]]
     return {"warm": warm, "parked": parked,
             "queue": len(POOL.candidates) + len(POOL.priority_candidates),
-            "total_warm": len(all_warm), "total_parked": len(all_parked)}
+            "total_warm": len(all_warm), "total_parked": len(all_parked),
+            "limit": limit, "offset": offset,
+            "subnets": POOL.subnet_counts()}
 
 
 @app.get("/api/settings")
@@ -1527,28 +2304,39 @@ async def post_settings(request: Request):
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
     
-    updates = {}
-    webshare_changed = False
-    for k, v in body.items():
-        if k in DEFAULTS:
-            # If the input looks masked (contains '...' or is '(none)'),
-            # ignore it so we don't overwrite the actual key on disk.
-            if k in ("upstream_api_key", "relay_api_key", "webshare_token") and isinstance(v, str):
-                if "..." in v or v == "(none)":
-                    continue
-            if k == "webshare_token" and v != settings.get("webshare_token"):
-                webshare_changed = True
-            updates[k] = v
-            
+    updates, errors = validate_settings_payload(body)
+    if errors:
+        return JSONResponse({"error": "invalid settings", "details": errors}, status_code=400)
+    webshare_changed = ("webshare_token" in updates
+                        and updates["webshare_token"] != settings.get("webshare_token"))
+
     res = apply_settings(updates)
-    
+    log.info("settings updated via API: %s", ", ".join(sorted(updates.keys())) or "(no changes)")
+
     if webshare_changed:
         log.info("Settings: Webshare tokens updated — resetting scraper interval to force immediate proxy check.")
         POOL.last_fetch = 0.0
         # Immediately kick off scraping & batch churning in the background
         asyncio.create_task(_fetch_sources())
-        
+
     return res
+
+
+@app.post("/api/profiles/{profile_id}")
+async def api_apply_profile(profile_id: str, request: Request):
+    """One-click upstream setup. Never clobbers an existing key with a blank."""
+    if not _check_relay_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    prof = PROVIDER_PROFILES.get(profile_id)
+    if not prof:
+        return JSONResponse({"error": "unknown profile"}, status_code=404)
+    updates = {"upstream_base_url": prof["upstream_base_url"], "probe_model": prof["probe_model"]}
+    if prof.get("upstream_api_key"):
+        updates["upstream_api_key"] = prof["upstream_api_key"]
+    apply_settings(updates)
+    _models_cache["updated"] = 0.0
+    log.info("provider profile applied: %s (%s)", profile_id, prof["label"])
+    return {"applied": profile_id, "settings": public_settings(), "note": prof.get("note", "")}
 
 
 @app.post("/api/keys/validate")

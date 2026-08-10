@@ -3,38 +3,55 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>ip-relay // egress rotator</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fbfbfb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cline x1='2' y1='12' x2='22' y2='12'/%3E%3Cpath d='M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+/* ════════════════════════════════════════════════════════════════
+   ip-relay dashboard — liquid metal / glassmorphism
+   Design tokens. Every colour used for text has been contrast-checked
+   against its own background (WCAG AA, >= 4.5:1 body / >= 3:1 large).
+   ════════════════════════════════════════════════════════════════ */
 :root {
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'Roboto Mono', ui-monospace, SFMono-Regular, monospace;
-  
+
   --bg: #070707;
-  --surface: rgba(18, 18, 18, 0.6);
-  --surface-border: rgba(255, 255, 255, 0.04);
-  
+  --surface: rgba(18, 18, 18, 0.55);
+  --surface-solid: #131313;
+  --surface-border: rgba(255, 255, 255, 0.07);
+  --surface-border-hi: rgba(255, 255, 255, 0.14);
+
   --text: #fbfbfb;
-  --text-muted: #8b8b8b;
-  
-  /* Metallic / Iridescent presets */
+  --text-dim: #c6c6c6;      /* 12.3:1 on --bg  */
+  --text-muted: #9b9b9b;    /*  7.3:1 on --bg  */
+
   --chrome-silver: linear-gradient(135deg, #aae8ff 0%, #dcd2bc 50%, #fff8e1 100%);
-  --pill-bg: rgba(255, 255, 255, 0.03);
-  --pill-border: rgba(255, 255, 255, 0.05);
-  
-  --success: #c5fe9e;
-  --warning: #f5ff70;
-  --danger: #f7888d;
+  --pill-bg: rgba(255, 255, 255, 0.035);
+  --pill-border: rgba(255, 255, 255, 0.07);
+
+  /* Semantic — all AA on near-black */
+  --ok: #7ee7a8;
+  --ok-dim: rgba(126, 231, 168, 0.16);
+  --warn: #ffd166;
+  --warn-dim: rgba(255, 209, 102, 0.16);
+  --bad: #ff8a90;
+  --bad-dim: rgba(255, 138, 144, 0.16);
+  --info: #86ccff;
+  --info-dim: rgba(134, 204, 255, 0.16);
+  --accent: #aae8ff;
+
+  --focus: #aae8ff;
+  --radius: 16px;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
 
 body {
   background-color: var(--bg);
@@ -43,1250 +60,1122 @@ body {
   min-height: 100vh;
   overflow-x: hidden;
   position: relative;
-  line-height: 1.5;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  font-size: 14px;
 }
 
-/* Background canvas for the WebGL liquid metal shader */
-#canvas-bg {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  z-index: -1;
-  pointer-events: none;
-  opacity: 0.35;
+/* ── Accessibility primitives ──────────────────────────────────── */
+
+/* Visible only to screen readers */
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
-.noise-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  z-index: -1;
-  pointer-events: none;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.02'/%3E%3C/svg%3E");
+/* Keyboard users get a strong, consistent ring everywhere. :focus-visible
+   keeps mouse clicks clean while never trapping keyboard users. */
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 8px;
 }
-
-/* Scrollbar styling */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 99px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-/* Main Layout Grid */
-.app-container {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 40px 20px;
-  position: relative;
-  z-index: 1;
-}
-
-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 40px;
-}
-
-.logo-group {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.logo-title {
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.03em;
-  background: var(--chrome-silver);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.logo-sub {
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-}
-
-/* Dynamic status badge */
-.status-badge {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--pill-bg);
-  border: 1px solid var(--pill-border);
-  padding: 6px 12px;
-  border-radius: 99px;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: var(--success);
-  box-shadow: 0 0 8px var(--success);
-}
-
-.status-dot.loading {
-  background-color: var(--warning);
-  box-shadow: 0 0 8px var(--warning);
-  animation: pulse 1.5s infinite;
-}
-
-.status-dot.error {
-  background-color: var(--danger);
-  box-shadow: 0 0 8px var(--danger);
-}
-
-@keyframes pulse {
-  0% { opacity: 0.4; }
-  50% { opacity: 1; }
-  100% { opacity: 0.4; }
-}
-
-/* Main rounded cards (Jakub style: rounded-[30px]) */
-.grid-main {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 24px;
-  margin-bottom: 24px;
-}
-
-@media (min-width: 800px) {
-  .grid-main {
-    grid-template-columns: 1.2fr 0.8fr;
+/* Fallback for browsers without :focus-visible */
+@supports not selector(:focus-visible) {
+  a:focus, button:focus, input:focus, [tabindex]:focus {
+    outline: 2px solid var(--focus); outline-offset: 2px;
   }
 }
 
-.card-30 {
+.skip-link {
+  position: absolute; left: 50%; transform: translateX(-50%) translateY(-140%);
+  top: 8px; z-index: 500;
+  background: var(--surface-solid); color: var(--text);
+  border: 1px solid var(--surface-border-hi);
+  padding: 10px 18px; border-radius: 99px;
+  font-size: 13px; font-weight: 600; text-decoration: none;
+  transition: transform 0.18s var(--ease);
+}
+.skip-link:focus { transform: translateX(-50%) translateY(0); }
+
+/* Honour the OS "reduce motion" setting: kill every ambient animation.
+   The shader render loop and the topology particle system also check this
+   in JS, so they stop advancing rather than just visually freezing. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  #canvas-bg { display: none; }
+}
+
+/* High-contrast preference: drop the glass, raise the borders */
+@media (prefers-contrast: more) {
+  :root {
+    --surface: #0d0d0d;
+    --surface-border: rgba(255, 255, 255, 0.3);
+    --text-muted: #c9c9c9;
+  }
+  #canvas-bg, .noise-overlay { display: none; }
+}
+
+/* ── Ambient background ────────────────────────────────────────── */
+#canvas-bg {
+  position: fixed; inset: 0; width: 100%; height: 100%;
+  z-index: -2; pointer-events: none; opacity: 0.34;
+}
+.noise-overlay {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.022'/%3E%3C/svg%3E");
+}
+
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.13); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.24); }
+
+/* ── Layout ────────────────────────────────────────────────────── */
+.app-container {
+  max-width: 1180px; margin: 0 auto; padding: 36px 20px 64px;
+  position: relative; z-index: 1;
+}
+
+header.site-header {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 20px; flex-wrap: wrap; margin-bottom: 28px;
+}
+.logo-group { display: flex; flex-direction: column; gap: 2px; }
+.logo-title {
+  font-size: 21px; font-weight: 700; letter-spacing: -0.03em;
+  background: var(--chrome-silver);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+  display: flex; align-items: center; gap: 9px;
+}
+/* Gradient text is invisible to forced-colors mode — restore a solid fill */
+@media (forced-colors: active) {
+  .logo-title { -webkit-text-fill-color: CanvasText; color: CanvasText; background: none; }
+}
+.logo-sub { font-size: 12px; color: var(--text-muted); letter-spacing: 0.02em; }
+.header-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* ── Cards / panels ────────────────────────────────────────────── */
+.card {
   background: var(--surface);
   border: 1px solid var(--surface-border);
-  border-radius: 30px;
-  padding: 28px;
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  transition: border-color 0.3s ease;
-  position: relative;
-  overflow: hidden;
+  border-radius: var(--radius);
+  padding: 20px;
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 18px 50px rgba(0,0,0,0.4);
+  transition: border-color 0.25s var(--ease), transform 0.25s var(--ease);
 }
-
-.card-30:hover {
-  border-color: rgba(255, 255, 255, 0.08);
-}
+.card:hover { border-color: var(--surface-border-hi); }
 
 .card-title {
-  font-size: 15px;
-  font-weight: 600;
-  margin-bottom: 20px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  display: flex; align-items: center; gap: 9px;
+  font-size: 13px; font-weight: 600; letter-spacing: 0.01em;
+  margin-bottom: 16px; color: var(--text);
+}
+.card-title svg { flex: 0 0 auto; opacity: 0.75; }
+
+.grid-main {
+  display: grid; grid-template-columns: 1.05fr 1fr; gap: 22px;
+}
+/* Grid and flex children default to min-width:auto, meaning they refuse to
+   shrink below their content's min-content width. One long code snippet or a
+   wide table then pushes the whole grid past the viewport (measured: 553px of
+   content inside a 350px column → 240px of page-level horizontal scroll).
+   min-width:0 lets the columns actually shrink so the inner scrollers work. */
+.grid-main > *, .grid-main > * > * { min-width: 0; }
+.card { min-width: 0; }
+.code-container, pre, .table-wrapper { min-width: 0; max-width: 100%; }
+pre { margin: 0; }
+@media (max-width: 900px) {
+  .grid-main { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .app-container { padding: 24px 14px 48px; }
+  .status-badge { width: 100%; flex: 1 1 100%; }
+  #baseUrlVal { min-width: 0; }
+  .copy-chip { max-width: 100%; }
+  #baseUrlVal { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tabs { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 4px; }
+  .tab-btn { flex: 0 0 auto; }
+  .engine-banner dl { gap: 10px; }
 }
 
-/* Stats Pill Row */
+/* ── Status badge ──────────────────────────────────────────────── */
+.status-badge {
+  display: flex; align-items: center; gap: 9px;
+  background: var(--pill-bg); border: 1px solid var(--pill-border);
+  border-radius: 99px; padding: 7px 15px 7px 12px;
+  font-size: 12px; font-weight: 500;
+  /* Fixed width, not min-width: the status string swaps between
+     "discovering routes…", "operational · N lanes" and
+     "quota exhausted · retry in 4m 30s" every few seconds. Any content-driven
+     width makes the whole header reflow on each poll and the buttons to its
+     left jump — measured at 114px of horizontal shift, enough that a real
+     click (and Playwright's stability check) lands on the wrong element. */
+  width: 250px;
+  flex: 0 0 250px;
+  font-variant-numeric: tabular-nums;
+}
+#statusText {
+  flex: 1 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.header-actions { min-height: 38px; }
+#baseUrlVal { min-width: 168px; display: inline-block; }
+.status-dot {
+  width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--ok); box-shadow: 0 0 0 0 rgba(126,231,168,0.55);
+  animation: ring 2.4s infinite;
+}
+.status-dot.loading { background: var(--warn); animation: ring-w 1.6s infinite; }
+.status-dot.error { background: var(--bad); animation: ring-b 1.1s infinite; }
+@keyframes ring { 0%{box-shadow:0 0 0 0 rgba(126,231,168,.5)} 70%{box-shadow:0 0 0 9px rgba(126,231,168,0)} 100%{box-shadow:0 0 0 0 rgba(126,231,168,0)} }
+@keyframes ring-w { 0%{box-shadow:0 0 0 0 rgba(255,209,102,.5)} 70%{box-shadow:0 0 0 9px rgba(255,209,102,0)} 100%{box-shadow:0 0 0 0 rgba(255,209,102,0)} }
+@keyframes ring-b { 0%{box-shadow:0 0 0 0 rgba(255,138,144,.55)} 70%{box-shadow:0 0 0 9px rgba(255,138,144,0)} 100%{box-shadow:0 0 0 0 rgba(255,138,144,0)} }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+/* Live-feed indicator */
+.feed-pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--ok);
+}
+.feed-pill .dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+  box-shadow: 0 0 8px var(--ok); animation: pulse 1.6s infinite;
+}
+.feed-pill.polling { color: var(--warn); }
+.feed-pill.polling .dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+.feed-pill.down { color: var(--bad); }
+.feed-pill.down .dot { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+
+/* ── Stat tiles with sparklines ────────────────────────────────── */
 .stats-row {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 16px;
-  margin-bottom: 24px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px; margin-bottom: 14px;
 }
-
-@media (min-width: 500px) {
-  .stats-row {
-    grid-template-columns: repeat(4, 1fr);
-  }
-}
-
 .stat-pill {
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--surface-border);
-  border-radius: 16px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  background: var(--surface); border: 1px solid var(--surface-border);
+  border-radius: 14px; padding: 13px 15px;
+  display: flex; flex-direction: column; gap: 2px;
+  position: relative; overflow: hidden;
+  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
 }
-
 .stat-val {
-  font-size: 22px;
-  font-weight: 500;
-  font-family: var(--font-mono);
-  letter-spacing: -0.02em;
+  font-size: 23px; font-weight: 600; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums; line-height: 1.15;
 }
-
 .stat-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em;
+  color: var(--text-muted); font-weight: 500;
 }
+.stat-sub { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
+.spark { display: block; width: 100%; height: 26px; margin-top: 6px; opacity: 0.9; }
 
-/* Drag Sliders (Jakub strength-track style) */
-.slider-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 20px;
-}
+/* value flash on change — a quiet "this just updated" cue */
+.flash { animation: flash 0.55s var(--ease); }
+@keyframes flash { 0% { color: var(--accent); } 100% { color: inherit; } }
 
-.slider-header {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
+/* ── Chips / badges ────────────────────────────────────────────── */
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--pill-bg); border: 1px solid var(--pill-border);
+  border-radius: 99px; padding: 3px 10px;
+  font-size: 11px; font-family: var(--font-mono); color: var(--text-dim);
 }
-
-.slider-label {
-  color: var(--text-muted);
-}
-
-.slider-value {
-  font-family: var(--font-mono);
-  font-weight: 500;
-}
-
-.slider-track-container {
-  position: relative;
-  height: 36px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--surface-border);
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-}
-
-.slider-fill {
-  position: absolute;
-  top: 0;
-  left: 0;
-  height: 100%;
-  background: linear-gradient(90deg, rgba(170,232,255,0.08) 0%, rgba(220,210,188,0.15) 100%);
-  border-right: 1px solid rgba(255, 255, 255, 0.2);
-  pointer-events: none;
-  transition: width 0.1s ease-out;
-}
-
-.slider-input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  cursor: ew-resize;
-  z-index: 2;
-  margin: 0;
-}
-
-.slider-track-text {
-  position: absolute;
-  left: 12px;
-  font-size: 11px;
-  color: var(--text-muted);
-  pointer-events: none;
-  z-index: 1;
-}
-
-/* Interactive connection guide (Capsule toolbar/Copy blocks) */
-.guide-tabs {
-  display: flex;
-  gap: 8px;
-  background: var(--pill-bg);
-  border: 1px solid var(--pill-border);
-  padding: 4px;
-  border-radius: 99px;
-  width: max-content;
-  margin-bottom: 20px;
-}
-
-.tab-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 500;
-  padding: 6px 14px;
-  border-radius: 99px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.tab-btn.active {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text);
-}
-
-.code-container {
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid var(--surface-border);
-  border-radius: 12px;
-  padding: 16px;
-  position: relative;
-  overflow: hidden;
-  margin-bottom: 16px;
-  min-height: 80px;
-}
-
-.code-block {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: #fff8e1;
-  white-space: pre-wrap;
-  word-break: break-all;
-  padding-right: 40px;
-  line-height: 1.6;
-}
-
-.copy-btn {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s ease;
-}
-
-.copy-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.1);
-}
-
-.copy-btn svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: var(--text-muted);
-  stroke-width: 2;
-  transition: stroke 0.15s ease;
-}
-
-.copy-btn:hover svg {
-  stroke: var(--text);
-}
-
-/* Custom inputs and toggles */
-.input-container {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.input-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.input-element {
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--surface-border);
-  padding: 10px 14px;
-  border-radius: 10px;
-  color: var(--text);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  outline: none;
-  transition: all 0.2s ease;
-}
-
-.input-element:focus {
-  border-color: rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.toggle-container {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px;
-  background: rgba(255, 255, 255, 0.01);
-  border: 1px solid var(--surface-border);
-  border-radius: 10px;
-}
-
-.toggle-text-group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.toggle-label {
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.toggle-desc {
-  font-size: 10px;
-  color: var(--text-muted);
-}
-
-/* Switch element */
-.switch {
-  position: relative;
-  display: inline-block;
-  width: 44px;
-  height: 24px;
-}
-
-.switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.switch-slider {
-  position: absolute;
-  cursor: pointer;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(255, 255, 255, 0.06);
-  transition: .2s;
-  border-radius: 34px;
-  border: 1px solid var(--surface-border);
-}
-
-.switch-slider:before {
-  position: absolute;
-  content: "";
-  height: 16px;
-  width: 16px;
-  left: 3px;
-  bottom: 3px;
-  background-color: var(--text-muted);
-  transition: .2s;
-  border-radius: 50%;
-}
-
-input:checked + .switch-slider {
-  background: linear-gradient(135deg, rgba(170,232,255,0.2) 0%, rgba(220,210,188,0.3) 100%);
-}
-
-input:checked + .switch-slider:before {
-  transform: translateX(20px);
-  background-color: var(--text);
-}
-
-.action-btn {
-  background: var(--text);
-  color: var(--bg);
-  border: none;
-  padding: 12px 24px;
-  border-radius: 99px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  width: 100%;
-  text-align: center;
-}
-
-.action-btn:hover {
-  transform: scale(0.98);
-  opacity: 0.9;
-}
-
-.action-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-  transform: none;
-}
-
-.input-element.input-invalid {
-  border-color: var(--danger);
-}
-
-.field-error {
-  display: block;
-  color: var(--danger);
-  font-size: 10px;
-  font-family: var(--font-mono);
-  min-height: 12px;
-}
-
-/* Collapsible Advanced settings */
-.advanced-box {
-  margin-bottom: 24px;
-  border: 1px solid var(--surface-border);
-  border-radius: 12px;
-  padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.01);
-}
-
-.advanced-box summary {
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  user-select: none;
-}
-
-.advanced-box[open] summary {
-  color: var(--text);
-  margin-bottom: 14px;
-}
-
-.advanced-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 16px;
-}
-
-@media (min-width: 500px) {
-  .advanced-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
-/* Dynamic Lane telemetry table */
-.lanes-table-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
-
-.table-wrapper {
-  max-height: 380px;
-  overflow-y: auto;
-  border: 1px solid var(--surface-border);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.2);
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-
-th {
-  text-align: left;
-  padding: 10px 16px;
-  color: var(--text-muted);
-  font-weight: 500;
-  border-bottom: 1px solid var(--surface-border);
-  position: sticky;
-  top: 0;
-  background: #0f0f0f;
-  z-index: 5;
-}
-
-td {
-  padding: 10px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.02);
-}
-
-tr:hover td {
-  background: rgba(255, 255, 255, 0.01);
-}
-
-.mono-cell {
-  font-family: var(--font-mono);
-}
-
-.score-bar-bg {
-  width: 80px;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 99px;
-  overflow: hidden;
-  display: inline-block;
-  vertical-align: middle;
-  margin-right: 8px;
-}
-
-.score-bar-fill {
-  height: 100%;
-  background: var(--chrome-silver);
-  border-radius: 99px;
-  transition: width 0.3s ease;
-}
+.chip.ok { color: var(--ok); border-color: rgba(126,231,168,0.3); background: var(--ok-dim); }
+.chip.warn { color: var(--warn); border-color: rgba(255,209,102,0.3); background: var(--warn-dim); }
+.chip.bad { color: var(--bad); border-color: rgba(255,138,144,0.32); background: var(--bad-dim); }
+.chip.info { color: var(--info); border-color: rgba(134,204,255,0.3); background: var(--info-dim); }
 
 .badge-proto {
-  background: rgba(255, 255, 255, 0.04);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 10px;
-  text-transform: uppercase;
+  background: var(--pill-bg); border: 1px solid var(--pill-border);
+  color: var(--text-dim); padding: 2px 7px; border-radius: 5px;
+  font-size: 10px; text-transform: uppercase; font-family: var(--font-mono);
+  letter-spacing: 0.04em;
 }
 
-/* Toast Alerts */
-.toast-container {
-  position: fixed;
-  bottom: 24px;
-  right: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  z-index: 100;
-}
-
-.toast {
-  background: rgba(18, 18, 18, 0.9);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: var(--text);
-  padding: 12px 20px;
-  border-radius: 12px;
-  font-size: 12px;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  transform: translateY(20px);
-  opacity: 0;
-  animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
-
-@keyframes slideIn {
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
-}
-
-.toast.success {
-  border-color: rgba(197, 254, 158, 0.3);
-}
-.toast.success svg {
-  stroke: var(--success);
-}
-.toast.danger {
-  border-color: rgba(247, 136, 141, 0.35);
-}
-.toast.danger svg {
-  stroke: var(--danger);
-}
-.toast.info svg {
-  stroke: var(--text-muted);
-}
-
-/* Terminal log component */
-.terminal-wrapper {
-  background: rgba(0, 0, 0, 0.5);
-  border: 1px solid var(--surface-border);
-  border-radius: 16px;
-  padding: 16px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  height: 200px;
-  overflow-y: auto;
-  color: #dcd2bc;
-  line-height: 1.6;
-}
-
-.log-entry {
-  margin-bottom: 4px;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.log-time {
-  color: var(--text-muted);
-  margin-right: 8px;
-}
-
-/* Top Base URL copy chip */
+/* ── Copy chip (button, not a div — keyboard reachable) ─────────── */
 .copy-chip {
-  background: var(--pill-bg);
-  border: 1px solid var(--pill-border);
-  border-radius: 99px;
-  padding: 4px 6px 4px 12px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s ease;
+  background: var(--pill-bg); border: 1px solid var(--pill-border);
+  border-radius: 99px; padding: 5px 7px 5px 14px;
+  display: flex; align-items: center; gap: 9px;
+  font-size: 12px; color: var(--text); cursor: pointer; font-family: inherit;
+  transition: background 0.2s var(--ease), border-color 0.2s var(--ease);
 }
-
-.copy-chip:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.1);
-}
-
+.copy-chip:hover { background: rgba(255,255,255,0.07); border-color: var(--surface-border-hi); }
 .copy-chip-btn {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.05);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 24px; height: 24px; border-radius: 50%;
+  background: rgba(255,255,255,0.06);
+  display: flex; align-items: center; justify-content: center;
+}
+.copy-chip-btn svg { width: 11px; height: 11px; fill: none; stroke: var(--text-muted); stroke-width: 2.5; }
+.copy-chip:hover .copy-chip-btn svg { stroke: var(--text); }
+
+/* ── Buttons ───────────────────────────────────────────────────── */
+.action-btn {
+  /* Explicit background-color under the gradient: if background-image fails to
+     paint (forced-colors, print, gradient unsupported) the dark #0a0a0a label
+     would otherwise sit on a transparent → near-black surface at 1.02:1. */
+  background-color: #dfe5e9;
+  background-image: linear-gradient(135deg, #f4f4f4, #cfd6da);
+  color: #0a0a0a; border: none; border-radius: 11px;
+  padding: 11px 16px; font-size: 13px; font-weight: 600;
+  font-family: inherit; cursor: pointer;
+  transition: transform 0.18s var(--ease), filter 0.18s var(--ease);
+}
+.action-btn:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+.action-btn:active:not(:disabled) { transform: translateY(0); }
+.action-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.ghost-btn {
+  background: rgba(255,255,255,0.05); border: 1px solid var(--surface-border-hi);
+  color: var(--text-dim); border-radius: 99px;
+  padding: 6px 13px; font-size: 11.5px; font-family: var(--font-mono);
+  cursor: pointer; transition: background 0.2s var(--ease), color 0.2s var(--ease);
+}
+.ghost-btn:hover:not(:disabled) { background: rgba(255,255,255,0.1); color: var(--text); }
+.ghost-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ghost-btn.sm { padding: 3px 9px; font-size: 10.5px; border-radius: 7px; }
+
+/* ── Forms ─────────────────────────────────────────────────────── */
+.input-container { display: flex; flex-direction: column; gap: 6px; }
+.input-label {
+  font-size: 11px; color: var(--text-muted); font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.input-element {
+  background: rgba(0,0,0,0.42); border: 1px solid var(--surface-border);
+  border-radius: 11px; padding: 11px 13px;
+  color: var(--text); font-size: 13px; font-family: inherit;
+  transition: border-color 0.2s var(--ease), background 0.2s var(--ease);
+  width: 100%;
+}
+.input-element::placeholder { color: #7d7d7d; }
+.input-element:focus { border-color: rgba(170,232,255,0.5); background: rgba(0,0,0,0.6); }
+.input-element.input-invalid { border-color: var(--bad); }
+.field-hint { font-size: 11px; color: var(--text-muted); }
+.field-error { font-size: 11px; color: var(--bad); min-height: 14px; font-family: var(--font-mono); }
+
+.advanced-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 560px) { .advanced-grid { grid-template-columns: 1fr; } }
+
+details.advanced-box {
+  border: 1px solid var(--surface-border); border-radius: 13px;
+  padding: 13px 15px; background: rgba(0,0,0,0.22);
+}
+details.advanced-box summary {
+  cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-dim);
+  list-style: none;
+}
+details.advanced-box summary::-webkit-details-marker { display: none; }
+details.advanced-box summary::before { content: '▸ '; color: var(--text-muted); }
+details.advanced-box[open] summary::before { content: '▾ '; }
+details.advanced-box[open] summary { margin-bottom: 15px; }
+
+/* Sliders */
+.slider-group { margin-bottom: 18px; }
+.slider-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 7px; }
+.slider-label { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+.slider-value { font-family: var(--font-mono); font-size: 13px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.slider-track-container {
+  position: relative; height: 38px; border-radius: 11px;
+  background: rgba(0,0,0,0.42); border: 1px solid var(--surface-border);
+  overflow: hidden; display: flex; align-items: center;
+}
+.slider-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: linear-gradient(90deg, rgba(170,232,255,0.16), rgba(220,210,188,0.24));
+  transition: width 0.12s linear;
+}
+.slider-track-text {
+  position: relative; z-index: 1; padding-left: 13px;
+  font-size: 11px; color: var(--text-muted); pointer-events: none;
+}
+.slider-input {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: grab; margin: 0;
+}
+.slider-input:focus-visible + .slider-visual,
+.slider-track-container:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* Toggles */
+.toggle-container {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+}
+.toggle-text-group { display: flex; flex-direction: column; }
+.toggle-label { font-size: 12.5px; color: var(--text); font-weight: 500; }
+.toggle-desc { font-size: 11px; color: var(--text-muted); }
+.switch { position: relative; display: inline-block; width: 42px; height: 24px; flex: 0 0 auto; }
+.switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.switch-slider {
+  position: absolute; inset: 0; background: rgba(255,255,255,0.11);
+  border-radius: 99px; transition: background 0.22s var(--ease); pointer-events: none;
+}
+.switch-slider::before {
+  content: ''; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px;
+  background: #f4f4f4; border-radius: 50%; transition: transform 0.22s var(--ease);
+}
+.switch input:checked + .switch-slider { background: rgba(170,232,255,0.55); }
+.switch input:checked + .switch-slider::before { transform: translateX(18px); }
+.switch input:focus-visible + .switch-slider { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* ── Tables ────────────────────────────────────────────────────── */
+.table-wrapper { overflow-x: auto; max-height: 430px; overflow-y: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: #0e0e0e;
+  text-align: left; padding: 9px 10px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-muted); font-weight: 600;
+  border-bottom: 1px solid var(--surface-border);
+  white-space: nowrap;
+}
+tbody td { padding: 9px 10px; border-bottom: 1px solid rgba(255,255,255,0.035); vertical-align: middle; }
+tbody tr:hover td { background: rgba(255,255,255,0.022); }
+tbody tr.is-parked td { opacity: 0.5; }
+tbody tr.row-new td { animation: rowIn 0.7s var(--ease); }
+@keyframes rowIn { 0% { background: rgba(126,231,168,0.16); } 100% { background: transparent; } }
+.mono-cell { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-dim); white-space: nowrap; }
+
+.score-bar-bg {
+  width: 100%; min-width: 54px; height: 4px; border-radius: 99px;
+  background: rgba(255,255,255,0.09); overflow: hidden; margin-bottom: 4px;
+}
+.score-bar-fill {
+  height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, #aae8ff, #dcd2bc);
+  transition: width 0.4s var(--ease);
+}
+.cap-dots { display: inline-flex; gap: 3px; vertical-align: middle; }
+.cap-dot { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,0.16); }
+.cap-dot.on { background: var(--info); box-shadow: 0 0 5px var(--info); }
+
+.table-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding-top: 11px; flex-wrap: wrap;
 }
 
-.copy-chip-btn svg {
-  width: 10px;
-  height: 10px;
-  fill: none;
-  stroke: var(--text-muted);
-  stroke-width: 2.5;
+/* ── Tabs ──────────────────────────────────────────────────────── */
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.tab-btn {
+  background: transparent; border: 1px solid transparent;
+  color: var(--text-muted); border-radius: 9px;
+  padding: 6px 12px; font-size: 12px; font-family: inherit;
+  cursor: pointer; transition: all 0.2s var(--ease);
+}
+.tab-btn:hover { color: var(--text-dim); background: rgba(255,255,255,0.04); }
+.tab-btn[aria-selected="true"] {
+  color: var(--text); background: rgba(255,255,255,0.07);
+  border-color: var(--surface-border-hi);
 }
 
-.copy-chip:hover .copy-chip-btn svg {
-  stroke: var(--text);
+/* ── Code block ────────────────────────────────────────────────── */
+.code-container { position: relative; }
+.code-block {
+  display: block; background: rgba(0,0,0,0.48);
+  border: 1px solid var(--surface-border); border-radius: 13px;
+  padding: 15px 46px 15px 15px;
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.75;
+  color: #dcd2bc; white-space: pre-wrap; word-break: break-word;
+  max-height: 260px; overflow: auto;
 }
+.copy-btn {
+  position: absolute; top: 9px; right: 9px;
+  width: 29px; height: 29px; border-radius: 8px;
+  background: rgba(255,255,255,0.06); border: 1px solid var(--surface-border);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background 0.2s var(--ease);
+}
+.copy-btn:hover { background: rgba(255,255,255,0.13); }
+.copy-btn svg { width: 13px; height: 13px; fill: none; stroke: var(--text-muted); stroke-width: 2; }
+.copy-btn:hover svg { stroke: var(--text); }
+
+/* ── Topology visualizer ───────────────────────────────────────── */
+.viz-shell {
+  position: relative; width: 100%; height: 260px;
+  background: radial-gradient(ellipse at center, rgba(20,26,32,0.7) 0%, rgba(0,0,0,0.55) 70%);
+  border-radius: var(--radius); overflow: hidden;
+  border: 1px solid var(--surface-border);
+}
+.viz-shell canvas { width: 100%; height: 100%; display: block; }
+.viz-legend {
+  position: absolute; bottom: 9px; left: 12px;
+  display: flex; gap: 12px; flex-wrap: wrap;
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-muted);
+  pointer-events: none;
+}
+.viz-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.viz-legend i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.viz-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+  text-align: center; padding: 20px; pointer-events: none;
+}
+.engine-banner {
+  background: rgba(255,255,255,0.025); border: 1px solid var(--surface-border);
+  border-radius: 13px; padding: 11px 16px; margin-bottom: 12px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+  font-size: 11.5px; font-family: var(--font-mono); color: var(--text-dim);
+}
+.engine-banner dl { display: flex; gap: 16px; flex-wrap: wrap; margin: 0; }
+.engine-banner div.kv { display: flex; gap: 6px; align-items: baseline; }
+.engine-banner dt { color: var(--text-muted); }
+.engine-banner dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+/* ── Diagnostics panel ─────────────────────────────────────────── */
+.diag-verdict {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 14px; border-radius: 13px; margin-bottom: 13px;
+  border: 1px solid var(--surface-border); background: rgba(0,0,0,0.28);
+}
+.diag-verdict.ok { border-color: rgba(126,231,168,0.34); background: var(--ok-dim); }
+.diag-verdict.warn { border-color: rgba(255,209,102,0.34); background: var(--warn-dim); }
+.diag-verdict.bad { border-color: rgba(255,138,144,0.34); background: var(--bad-dim); }
+.diag-verdict h3 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.diag-verdict p { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+.diag-list { list-style: none; display: flex; flex-direction: column; gap: 7px; }
+.diag-list li {
+  font-size: 12px; color: var(--text-dim); line-height: 1.6;
+  padding-left: 20px; position: relative;
+}
+.diag-list li::before {
+  content: '!'; position: absolute; left: 0; top: 0;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--warn-dim); color: var(--warn);
+  font-size: 10px; font-weight: 700; text-align: center; line-height: 14px;
+}
+.reason-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.reason-cell {
+  background: rgba(0,0,0,0.3); border: 1px solid var(--surface-border);
+  border-radius: 10px; padding: 9px 11px;
+}
+.reason-cell .n { font-family: var(--font-mono); font-size: 16px; font-weight: 600; }
+.reason-cell .k { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+
+/* ── Terminal log ──────────────────────────────────────────────── */
+.log-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.terminal-wrapper {
+  background: rgba(0,0,0,0.52); border: 1px solid var(--surface-border);
+  border-radius: 13px; padding: 14px;
+  font-family: var(--font-mono); font-size: 11.5px;
+  height: 240px; overflow-y: auto; color: #dcd2bc; line-height: 1.65;
+}
+.log-entry { margin-bottom: 3px; white-space: pre-wrap; word-break: break-word; }
+.log-time { color: var(--text-muted); margin-right: 8px; }
+.log-msg.scraper { color: var(--info); }
+.log-msg.probe-ok { color: var(--ok); }
+.log-msg.probe { color: #c9b6ff; }
+.log-msg.settings { color: var(--warn); }
+.log-msg.churn { color: #8fd7ff; }
+.log-msg.error { color: var(--bad); }
+
+/* ── Toasts ────────────────────────────────────────────────────── */
+.toast-container {
+  position: fixed; bottom: 22px; right: 22px; z-index: 300;
+  display: flex; flex-direction: column; gap: 9px; max-width: min(92vw, 380px);
+}
+.toast {
+  background: rgba(16,16,16,0.94); border: 1px solid var(--surface-border-hi);
+  color: var(--text); padding: 12px 18px; border-radius: 12px;
+  font-size: 12.5px; font-weight: 500;
+  display: flex; align-items: center; gap: 9px;
+  box-shadow: 0 12px 34px rgba(0,0,0,0.55);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  transform: translateY(18px); opacity: 0;
+  animation: slideIn 0.3s var(--ease) forwards;
+}
+@keyframes slideIn { to { transform: translateY(0); opacity: 1; } }
+.toast.success { border-color: rgba(126,231,168,0.34); }
+.toast.success svg { stroke: var(--ok); }
+.toast.danger { border-color: rgba(255,138,144,0.38); }
+.toast.danger svg { stroke: var(--bad); }
+.toast.info svg { stroke: var(--info); }
+
+/* ── Modals ────────────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.74);
+  z-index: 400; display: none; align-items: center; justify-content: center;
+  padding: 20px; backdrop-filter: blur(4px);
+}
+.modal-backdrop.open { display: flex; }
+.modal {
+  background: var(--surface-solid); border: 1px solid var(--surface-border-hi);
+  border-radius: var(--radius); padding: 24px;
+  max-width: 460px; width: 100%; max-height: 86vh; overflow-y: auto;
+  box-shadow: 0 26px 70px rgba(0,0,0,0.7);
+}
+.modal h2 { font-size: 15px; font-weight: 600; margin-bottom: 7px; }
+.modal p.modal-sub { font-size: 12px; color: var(--text-muted); line-height: 1.65; margin-bottom: 16px; }
+.profile-list { display: flex; flex-direction: column; gap: 9px; margin-bottom: 16px; }
+.profile-item {
+  width: 100%; text-align: left; cursor: pointer;
+  background: rgba(255,255,255,0.03); border: 1px solid var(--surface-border);
+  border-radius: 12px; padding: 12px 14px; color: var(--text);
+  font-family: inherit; transition: all 0.2s var(--ease);
+}
+.profile-item:hover, .profile-item[aria-pressed="true"] {
+  background: rgba(170,232,255,0.09); border-color: rgba(170,232,255,0.4);
+}
+.profile-item .pname { font-size: 13px; font-weight: 600; display: block; }
+.profile-item .pnote { font-size: 11px; color: var(--text-muted); display: block; margin-top: 3px; line-height: 1.5; }
+.profile-item .purl { font-size: 10.5px; color: var(--text-dim); font-family: var(--font-mono); display: block; margin-top: 5px; }
+
+footer.site-footer {
+  margin-top: 34px; padding-top: 18px; border-top: 1px solid var(--surface-border);
+  display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--text-muted);
+}
+footer.site-footer a { color: var(--text-dim); }
 </style>
 </head>
 <body>
 
-<canvas id="canvas-bg"></canvas>
-<div class="noise-overlay"></div>
+<canvas id="canvas-bg" aria-hidden="true"></canvas>
+<div class="noise-overlay" aria-hidden="true"></div>
+
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<!-- Screen readers announce pool/status changes from here without stealing focus -->
+<div id="liveRegion" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+<div id="alertRegion" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
 
 <div class="app-container">
-  <!-- Header -->
-  <header>
+
+  <header class="site-header">
     <div class="logo-group">
-      <div class="logo-title">
+      <h1 class="logo-title">
         <span>ip-relay</span>
-        <span class="badge-proto" style="margin-left: 2px; font-size: 9px; vertical-align: middle;">v__VERSION__</span>
-      </div>
-      <div class="logo-sub">resilient egress rotator</div>
+        <span class="badge-proto" style="font-size: 9px;">v__VERSION__</span>
+      </h1>
+      <p class="logo-sub">resilient egress rotator</p>
     </div>
-    
-    <div style="display: flex; gap: 12px; align-items: center;">
-      <!-- Copyable Base URL chip -->
-      <div class="copy-chip" onclick="copyBaseUrl()">
+
+    <div class="header-actions">
+      <button type="button" class="copy-chip" onclick="copyBaseUrl()"
+              aria-label="Copy the relay base URL to the clipboard">
         <span style="color: var(--text-muted)">Base URL:</span>
-        <span id="baseUrlVal" style="font-family: var(--font-mono); font-weight: 500;">loading...</span>
-        <div class="copy-chip-btn">
+        <span id="baseUrlVal" style="font-family: var(--font-mono); font-weight: 500;">loading…</span>
+        <span class="copy-chip-btn" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M8 10a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2h-8a2 2 0 01-2-2v-8z"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v8a2 2 0 002 2h2"/></svg>
-        </div>
-      </div>
-      
-      <!-- Status Indicator -->
-      <div class="status-badge">
-        <div id="statusPill" class="status-dot"></div>
-        <span id="statusText">operational</span>
-      </div>
+        </span>
+      </button>
+
+      <button type="button" class="ghost-btn" onclick="openProfiles()"
+              aria-haspopup="dialog">Provider setup</button>
+
+      <p class="status-badge">
+        <span id="statusPill" class="status-dot" aria-hidden="true"></span>
+        <span class="sr-only">Relay status:</span>
+        <span id="statusText">connecting…</span>
+      </p>
     </div>
   </header>
 
-  <!-- Metrics / Stats Row -->
-  <div class="stats-row">
-    <div class="stat-pill">
-      <span class="stat-val" id="cWarm">0</span>
-      <span class="stat-label">Warm Lanes</span>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-val" id="cParked">0</span>
-      <span class="stat-label">Parked Lanes</span>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-val" id="cRequests">0</span>
-      <span class="stat-label">Requests</span>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-val" id="cFailovers">0</span>
-      <span class="stat-label">Failovers</span>
-    </div>
-  </div>
+  <main id="main">
 
-  <!-- Extended Metrics / Stats Row -->
-  <div class="stats-row">
-    <div class="stat-pill">
-      <span class="stat-val" id="statUptime">00:00</span>
-      <span class="stat-label">Uptime</span>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-val" id="statSources">0</span>
-      <span class="stat-label">Sources OK</span>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-val" id="statLatency">-</span>
-      <span class="stat-label">Best Latency</span>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-val" id="statProbes">0 / 0</span>
-      <span class="stat-label">Probes OK / Burned</span>
-    </div>
-  </div>
+    <!-- ══ Live metrics ══════════════════════════════════════════ -->
+    <section aria-labelledby="h-metrics">
+      <h2 id="h-metrics" class="sr-only">Live metrics</h2>
 
-  <!-- Live Egress Network Topology Visualizer Card -->
-  <div class="card-30" style="margin-bottom: 24px; position: relative; overflow: hidden; padding: 20px;">
-    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
-      <div class="card-title" style="margin-bottom: 0;">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        Live Egress Topology & Traffic Matrix
-      </div>
-      <div style="font-size: 11px; color: #4ade80; font-family: var(--font-mono); display: flex; align-items: center; gap: 6px;">
-        <span style="display: inline-block; width: 6px; height: 6px; background: #4ade80; border-radius: 50%; box-shadow: 0 0 8px #4ade80; animation: pulse 1.5s infinite;"></span>
-        <span id="netStatusText">ACTIVE MATRIX</span>
-      </div>
-    </div>
-    
-    <!-- Live Status Banner -->
-    <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 10px 16px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-family: var(--font-mono); color: #e4e4e7; backdrop-filter: blur(10px); flex-wrap: wrap; gap: 10px;">
-      <div style="display: flex; align-items: center; gap: 8px;">
-        <span style="color: var(--text-muted);">ENGINE STATE:</span>
-        <span id="engineState" style="color: #60a5fa; font-weight: bold; text-transform: uppercase;">IDLE</span>
-      </div>
-      <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
-        <div>QUEUE: <span id="engineQueue" style="color: #facc15;">0</span></div>
-        <div>TESTED: <span id="engineTested" style="color: #a78bfa;">0</span></div>
-        <div>WARM: <span id="engineWarm" style="color: #4ade80;">0</span></div>
-        <div>LANE FAILS: <span id="engineFails" style="color: #f87171;">0</span></div>
-        <div>STREAMS: <span id="engineStreams" style="color: #38bdf8;">0</span></div>
-        <button type="button" id="btnRefresh" onclick="refreshProxies()" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: #e4e4e7; border-radius: 99px; padding: 4px 12px; font-size: 10px; font-family: var(--font-mono); cursor: pointer; transition: all 0.2s;">Refresh proxies now</button>
-      </div>
-    </div>
-    
-    <div style="position: relative; width: 100%; height: 210px; background: rgba(0, 0, 0, 0.4); border-radius: 16px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.05);">
-      <canvas id="networkCanvas" style="width: 100%; height: 100%; display: block;"></canvas>
-    </div>
-  </div>
-
-  <!-- Main Content Grid -->
-  <div class="grid-main">
-    <!-- Left Column: Guide & Dynamic Egress Lanes -->
-    <div style="display: flex; flex-direction: column; gap: 24px;">
-      <!-- Connection Guide -->
-      <div class="card-30">
-        <div class="card-title">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-          Connect your application
+      <div class="stats-row">
+        <div class="stat-pill">
+          <span class="stat-val" id="cWarm">0</span>
+          <span class="stat-label">Warm lanes</span>
+          <span class="stat-sub" id="cWarmSub">—</span>
+          <canvas class="spark" id="sparkWarm" width="240" height="52" aria-hidden="true"></canvas>
         </div>
-        
-        <div class="guide-tabs">
-          <button class="tab-btn active" onclick="switchGuide('curl')">curl</button>
-          <button class="tab-btn" onclick="switchGuide('claude')">Claude Code</button>
-          <button class="tab-btn" onclick="switchGuide('python')">Python</button>
-          <button class="tab-btn" onclick="switchGuide('router')">9router</button>
+        <div class="stat-pill">
+          <span class="stat-val" id="cSubnets">0</span>
+          <span class="stat-label">Unique /24 subnets</span>
+          <span class="stat-sub" id="cSubnetsSub">real width</span>
         </div>
-        
-        <!-- Code Content Block -->
-        <div class="code-container">
-          <pre><code id="codeBlock" class="code-block"></code></pre>
-          <button class="copy-btn" onclick="copyCode()" title="Copy snippet">
-            <svg viewBox="0 0 24 24"><path d="M8 10a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2h-8a2 2 0 01-2-2v-8z"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v8a2 2 0 002 2h2"/></svg>
-          </button>
+        <div class="stat-pill">
+          <span class="stat-val" id="cRpm">0</span>
+          <span class="stat-label">Requests / min</span>
+          <span class="stat-sub" id="cRpmSub">—</span>
+          <canvas class="spark" id="sparkRpm" width="240" height="52" aria-hidden="true"></canvas>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-val" id="cP95">—</span>
+          <span class="stat-label">p95 latency</span>
+          <span class="stat-sub" id="cP95Sub">5 min window</span>
+          <canvas class="spark" id="sparkP95" width="240" height="52" aria-hidden="true"></canvas>
         </div>
       </div>
 
-      <!-- Telemetry List -->
-      <div class="card-30">
-        <div class="lanes-table-header">
-          <div class="card-title" style="margin-bottom: 0;">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-            Egress lanes
-          </div>
-          <span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);" id="laneRatio">0 / 0 total</span>
+      <div class="stats-row">
+        <div class="stat-pill">
+          <span class="stat-val" id="cSuccess">—</span>
+          <span class="stat-label">Success rate</span>
+          <span class="stat-sub" id="cSuccessSub">5 min window</span>
         </div>
-        
-        <div class="table-wrapper">
-          <table>
-            <thead>
-              <tr>
-                <th>Address</th>
-                <th>Proto</th>
-                <th>Score</th>
-                <th>Latency</th>
-                <th>Usage</th>
-              </tr>
-            </thead>
-            <tbody id="laneRows">
-              <tr>
-                <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;">
-                  Discovering egress pathways...
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="stat-pill">
+          <span class="stat-val" id="statUptime">00:00</span>
+          <span class="stat-label">Uptime</span>
+          <span class="stat-sub" id="cReqTotal">0 requests total</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-val" id="statLatency">—</span>
+          <span class="stat-label">Best lane</span>
+          <span class="stat-sub" id="cTiers">—</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-val" id="statProbes">0 / 0</span>
+          <span class="stat-label">Probes ok / burned</span>
+          <span class="stat-sub" id="cFailovers">0 failovers</span>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- Right Column: Settings & Live telemetry logs -->
-    <div style="display: flex; flex-direction: column; gap: 24px;">
-      <!-- Config Form -->
-      <div class="card-30">
-        <div class="card-title">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          Rotator settings
+    <!-- ══ Topology ══════════════════════════════════════════════ -->
+    <section class="card" style="margin-bottom: 22px;" aria-labelledby="h-topo">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:15px;">
+        <h2 id="h-topo" class="card-title" style="margin-bottom:0;">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          Live egress topology
+        </h2>
+        <p class="feed-pill" id="feedPill">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="feedText">connecting…</span>
+        </p>
+      </div>
+
+      <div class="engine-banner">
+        <div class="kv">
+          <span style="color: var(--text-muted);">ENGINE</span>
+          <strong id="engineState" style="color: var(--info); text-transform: uppercase;">idle</strong>
         </div>
-        
-        <form id="settingsForm" onsubmit="saveSettings(event)" novalidate>
-          <!-- Drag Slider: Target Pool Size -->
-          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 10px;">Upstream provider</div>
-          
-          <div class="input-container" style="margin-bottom: 12px;">
-            <label class="input-label" for="cfgUpstreamUrl">Base URL</label>
-            <input type="url" class="input-element" id="cfgUpstreamUrl" placeholder="https://opencode.ai/zen/v1" style="font-family: var(--font-mono); font-size: 11px;">
-          </div>
-          
-          <div class="input-container" style="margin-bottom: 12px;">
-            <label class="input-label" for="cfgUpstreamKey">Upstream API Key</label>
-            <input type="password" class="input-element" id="cfgUpstreamKey" placeholder="public">
-          </div>
-          
-          <div class="input-container" style="margin-bottom: 20px;">
-            <label class="input-label" for="cfgProbeModel">Probe Model</label>
-            <input type="text" class="input-element" id="cfgProbeModel" placeholder="deepseek-v4-flash-free" style="font-family: var(--font-mono); font-size: 11px;">
-          </div>
-          
-          <div class="slider-group">
-            <div class="slider-header">
-              <span class="slider-label">Target Pool Size</span>
-              <span class="slider-value" id="valPoolTarget">30</span>
-            </div>
-            <div class="slider-track-container">
-              <div class="slider-fill" id="fillPoolTarget" style="width: 30%;"></div>
-              <span class="slider-track-text">Lanes to maintain</span>
-              <input type="range" class="slider-input" id="cfgPoolTarget" min="5" max="100" value="30" oninput="updateSlider('PoolTarget')">
-            </div>
+        <dl>
+          <div class="kv"><dt>QUEUE</dt><dd id="engineQueue">0</dd></div>
+          <div class="kv"><dt>TESTED</dt><dd id="engineTested">0</dd></div>
+          <div class="kv"><dt>WARM</dt><dd id="engineWarm">0</dd></div>
+          <div class="kv"><dt>FAILS</dt><dd id="engineFails">0</dd></div>
+          <div class="kv"><dt>STREAMS</dt><dd id="engineStreams">0</dd></div>
+          <div class="kv"><dt>CONC</dt><dd id="engineConc">—</dd></div>
+        </dl>
+        <button type="button" id="btnRefresh" class="ghost-btn" onclick="refreshProxies()">Refresh proxies now</button>
+      </div>
+
+      <!-- The canvas is decorative; the table below is the accessible equivalent -->
+      <div class="viz-shell">
+        <canvas id="networkCanvas" aria-hidden="true"></canvas>
+        <p class="viz-empty" id="vizEmpty">no warm lanes yet — discovering egress pathways…</p>
+        <p class="viz-legend" aria-hidden="true">
+          <span><i style="background:#7ee7a8"></i>fast &lt;1.5s</span>
+          <span><i style="background:#ffd166"></i>medium &lt;4s</span>
+          <span><i style="background:#ff8a90"></i>slow</span>
+          <span><i style="background:#fff"></i>relay core</span>
+        </p>
+      </div>
+      <p class="sr-only" id="vizSummary">Topology visualisation. The egress lanes table contains the same data in text form.</p>
+    </section>
+
+    <div class="grid-main">
+      <!-- ── Left column ───────────────────────────────────────── -->
+      <div style="display:flex; flex-direction:column; gap:22px;">
+
+        <!-- Connect guide -->
+        <section class="card" aria-labelledby="h-connect">
+          <h2 id="h-connect" class="card-title">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            Connect your application
+          </h2>
+
+          <div class="tabs" role="tablist" aria-label="Client code examples">
+            <button class="tab-btn" role="tab" id="tab-curl" aria-selected="true" aria-controls="codePanel" onclick="switchGuide('curl')">curl</button>
+            <button class="tab-btn" role="tab" id="tab-claude" aria-selected="false" aria-controls="codePanel" onclick="switchGuide('claude')">Claude Code</button>
+            <button class="tab-btn" role="tab" id="tab-python" aria-selected="false" aria-controls="codePanel" onclick="switchGuide('python')">Python</button>
+            <button class="tab-btn" role="tab" id="tab-openai" aria-selected="false" aria-controls="codePanel" onclick="switchGuide('openai')">Node</button>
+            <button class="tab-btn" role="tab" id="tab-router" aria-selected="false" aria-controls="codePanel" onclick="switchGuide('router')">9router</button>
+            <button class="tab-btn" role="tab" id="tab-env" aria-selected="false" aria-controls="codePanel" onclick="switchGuide('env')">.env</button>
           </div>
 
-          <!-- Drag Slider: Concurrency -->
-          <div class="slider-group">
-            <div class="slider-header">
-              <span class="slider-label">Test Concurrency</span>
-              <span class="slider-value" id="valConcurrency">60</span>
-            </div>
-            <div class="slider-track-container">
-              <div class="slider-fill" id="fillConcurrency" style="width: 40%;"></div>
-              <span class="slider-track-text">Simultaneous lane checks</span>
-              <input type="range" class="slider-input" id="cfgConcurrency" min="5" max="150" value="60" oninput="updateSlider('Concurrency')">
+          <div class="code-container" id="codePanel" role="tabpanel" aria-labelledby="tab-curl" tabindex="0">
+            <pre><code id="codeBlock" class="code-block"></code></pre>
+            <button class="copy-btn" onclick="copyCode()" aria-label="Copy code snippet">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 10a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2h-8a2 2 0 01-2-2v-8z"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v8a2 2 0 002 2h2"/></svg>
+            </button>
+          </div>
+        </section>
+
+        <!-- Lanes table -->
+        <section class="card" aria-labelledby="h-lanes">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
+            <h2 id="h-lanes" class="card-title" style="margin-bottom:0;">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+              Egress lanes
+            </h2>
+            <span class="chip" id="laneRatio">0 / 0 total</span>
+          </div>
+
+          <div class="table-wrapper" tabindex="0" role="region" aria-labelledby="h-lanes">
+            <table>
+              <caption class="sr-only">Warm and parked egress lanes with score, latency, subnet and usage counters</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Address</th>
+                  <th scope="col">Proto</th>
+                  <th scope="col">Score</th>
+                  <th scope="col">Latency</th>
+                  <th scope="col">Load</th>
+                  <th scope="col">OK / Fail</th>
+                </tr>
+              </thead>
+              <tbody id="laneRows">
+                <tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:28px;">Discovering egress pathways…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="table-foot">
+            <span class="chip" id="pageInfo">—</span>
+            <span style="display:flex; gap:8px;">
+              <button type="button" class="ghost-btn sm" id="btnPrev" onclick="pagePool(-1)">‹ Prev</button>
+              <button type="button" class="ghost-btn sm" id="btnNext" onclick="pagePool(1)">Next ›</button>
+            </span>
+          </div>
+        </section>
+
+        <!-- Diagnostics -->
+        <section class="card" aria-labelledby="h-diag">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
+            <h2 id="h-diag" class="card-title" style="margin-bottom:0;">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              Diagnostics
+            </h2>
+            <button type="button" class="ghost-btn sm" onclick="loadDiagnostics(true)">Re-run</button>
+          </div>
+
+          <div id="diagVerdict" class="diag-verdict">
+            <div>
+              <h3 id="diagTitle">Running checks…</h3>
+              <p id="diagAdvice">Collecting probe results and configuration warnings.</p>
             </div>
           </div>
-          
-          <div class="input-container" style="margin-bottom: 20px;">
-            <label class="input-label" for="cfgWebshare">Webshare API Accounts (Keys / Tokens)</label>
-            <textarea class="input-element" id="cfgWebshare" rows="3" style="resize: vertical; font-family: monospace; font-size: 11px; line-height: 1.4; padding: 12px; background: rgba(0, 0, 0, 0.4);" placeholder="Paste Webshare API keys here (one key per line, or comma-separated)"></textarea>
-            <span style="font-size: 9px; color: var(--text-muted); margin-top: 4px; display: block;">Paste multiple accounts/tokens. All keys are encrypted locally on disk.</span>
+
+          <ul class="diag-list" id="diagWarnings"></ul>
+
+          <h3 style="font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-muted); margin:16px 0 8px;">Probe failure breakdown</h3>
+          <div class="reason-grid" id="diagReasons">
+            <div class="reason-cell"><span class="n">—</span><span class="k">no data yet</span></div>
           </div>
-          
-          <div class="toggle-container" style="margin-bottom: 24px;">
-            <div class="toggle-text-group">
-              <span class="toggle-label">Direct Connection Fallback</span>
-              <span class="toggle-desc">Allow direct VPS IP on exhaust</span>
-            </div>
-            <label class="switch">
-              <input type="checkbox" id="cfgDirectLane">
-              <span class="switch-slider"></span>
-            </label>
-          </div>
-          
-          <details class="advanced-box">
-            <summary>Advanced settings</summary>
-            <div style="display: flex; flex-direction: column; gap: 16px;">
+        </section>
+      </div>
+
+      <!-- ── Right column ──────────────────────────────────────── -->
+      <div style="display:flex; flex-direction:column; gap:22px;">
+
+        <!-- Settings -->
+        <section class="card" aria-labelledby="h-settings">
+          <h2 id="h-settings" class="card-title">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            Rotator settings
+          </h2>
+
+          <form id="settingsForm" onsubmit="saveSettings(event)" novalidate>
+            <fieldset style="border:none; margin-bottom:18px;">
+              <legend class="input-label" style="margin-bottom:10px;">Upstream provider</legend>
+
+              <div class="input-container" style="margin-bottom:12px;">
+                <label class="input-label" for="cfgUpstreamUrl">Base URL</label>
+                <input type="url" class="input-element" id="cfgUpstreamUrl" name="upstream_base_url"
+                       placeholder="https://opencode.ai/zen/v1" spellcheck="false"
+                       style="font-family:var(--font-mono); font-size:11.5px;">
+              </div>
+
+              <div class="input-container" style="margin-bottom:12px;">
+                <label class="input-label" for="cfgUpstreamKey">Upstream API key</label>
+                <input type="password" class="input-element" id="cfgUpstreamKey" name="upstream_api_key"
+                       placeholder="leave blank to keep the stored key" autocomplete="new-password"
+                       style="font-family:var(--font-mono); font-size:11.5px;">
+              </div>
+
               <div class="input-container">
-                <label class="input-label" for="cfgRelayKey">Relay API Key</label>
-                <div style="display: flex; gap: 8px;">
-                  <input type="password" class="input-element" id="cfgRelayKey" placeholder="optional — protects relay &amp; dashboard endpoints" style="flex: 1; font-family: var(--font-mono); font-size: 11px;" autocomplete="new-password">
-                  <button type="button" id="btnToggleRelayKey" onclick="toggleRelayKeyVisibility()" style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 10px 14px; font-size: 11px; color: #e4e4e7; cursor: pointer;">Show</button>
-                </div>
-                <span style="font-size: 9px; color: var(--text-muted); margin-top: 4px; display: block;">Saving a new key here applies it to the relay and stores it as this browser's dashboard key.</span>
+                <label class="input-label" for="cfgProbeModel">Probe model</label>
+                <input type="text" class="input-element" id="cfgProbeModel" name="probe_model"
+                       list="modelList" spellcheck="false"
+                       placeholder="deepseek-v4-flash-free"
+                       style="font-family:var(--font-mono); font-size:11.5px;">
+                <datalist id="modelList"></datalist>
+                <span class="field-hint">Cheapest model on the upstream — used for every lane probe.</span>
               </div>
-              
-              <div class="toggle-container">
-                <div class="toggle-text-group">
-                  <span class="toggle-label">Allow SOCKS Sources</span>
-                  <span class="toggle-desc">Include SOCKS4/5 proxies in the candidate pool</span>
-                </div>
-                <label class="switch">
-                  <input type="checkbox" id="cfgAllowSocks">
-                  <span class="switch-slider"></span>
-                </label>
-              </div>
-              
-              <div class="advanced-grid">
-                <div class="input-container">
-                  <label class="input-label" for="cfgMaxCandidates">Max Candidates</label>
-                  <input type="number" class="input-element" id="cfgMaxCandidates" min="100" max="10000" step="100" value="3000" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
-                  <span class="field-error" id="errCfgMaxCandidates"></span>
-                </div>
-                <div class="input-container">
-                  <label class="input-label" for="cfgProbeTimeout">Probe Timeout (s)</label>
-                  <input type="number" class="input-element" id="cfgProbeTimeout" min="5" max="60" step="1" value="25" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
-                  <span class="field-error" id="errCfgProbeTimeout"></span>
-                </div>
-                <div class="input-container">
-                  <label class="input-label" for="cfgRelayTimeout">Relay Proxy Timeout (s)</label>
-                  <input type="number" class="input-element" id="cfgRelayTimeout" min="10" max="120" step="1" value="40" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
-                  <span class="field-error" id="errCfgRelayTimeout"></span>
-                </div>
-                <div class="input-container">
-                  <label class="input-label" for="cfgRelayAttempts">Relay Attempts</label>
-                  <input type="number" class="input-element" id="cfgRelayAttempts" min="1" max="12" step="1" value="6" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
-                  <span class="field-error" id="errCfgRelayAttempts"></span>
-                </div>
-                <div class="input-container">
-                  <label class="input-label" for="cfgCooldownSec">Lane Cooldown (s)</label>
-                  <input type="number" class="input-element" id="cfgCooldownSec" min="10" max="3600" step="1" value="90" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
-                  <span class="field-error" id="errCfgCooldownSec"></span>
-                </div>
-                <div class="input-container">
-                  <label class="input-label" for="cfgRecoverSec">Lane Recover (s)</label>
-                  <input type="number" class="input-element" id="cfgRecoverSec" min="30" max="7200" step="1" value="240" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
-                  <span class="field-error" id="errCfgRecoverSec"></span>
-                </div>
-              </div>
-            </div>
-          </details>
-          
-          <div style="display: flex; gap: 12px; margin-top: 24px;">
-            <button type="submit" class="action-btn" id="btnApply" style="flex: 1;">Apply & Save</button>
-            <button type="button" class="action-btn" id="btnValidate" onclick="triggerKeyValidation()" style="flex: 1; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.08); color: #e4e4e7;">Validate Keys</button>
-          </div>
-          
-          <!-- Key Verification Panel -->
-          <div id="keyValidationPanel" style="margin-top: 16px; display: none; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 14px; font-family: var(--font-mono); font-size: 11px;">
-            <div style="font-weight: bold; color: var(--text-muted); margin-bottom: 8px; font-size: 10px; text-transform: uppercase;">Key Verification Results</div>
-            <div id="valResultUpstream" style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.04); padding-bottom: 8px;">
-              <span style="color: #a1a1aa;">Upstream:</span>
-              <span class="val-status">PENDING</span>
-            </div>
-            <div id="valResultWebshareList" style="display: flex; flex-direction: column; gap: 6px;">
-              <!-- Webshare results list -->
-            </div>
-          </div>
-        </form>
-      </div>
+            </fieldset>
 
-      <!-- Live Logs -->
-      <div class="card-30">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
-          <div class="card-title" style="margin-bottom: 0;">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-            Telemetry Trace
+            <div class="slider-group">
+              <div class="slider-header">
+                <label class="slider-label" for="cfgPoolTarget">Target pool size</label>
+                <output class="slider-value" id="valPoolTarget" for="cfgPoolTarget">30</output>
+              </div>
+              <div class="slider-track-container">
+                <div class="slider-fill" id="fillPoolTarget" style="width:30%" aria-hidden="true"></div>
+                <span class="slider-track-text" aria-hidden="true">Lanes to maintain</span>
+                <input type="range" class="slider-input" id="cfgPoolTarget" name="proxy_pool_target"
+                       min="5" max="100" step="1" value="30" oninput="updateSlider('PoolTarget')">
+              </div>
+            </div>
+
+            <div class="slider-group">
+              <div class="slider-header">
+                <label class="slider-label" for="cfgConcurrency">Test concurrency</label>
+                <output class="slider-value" id="valConcurrency" for="cfgConcurrency">60</output>
+              </div>
+              <div class="slider-track-container">
+                <div class="slider-fill" id="fillConcurrency" style="width:40%" aria-hidden="true"></div>
+                <span class="slider-track-text" aria-hidden="true">Simultaneous lane checks</span>
+                <input type="range" class="slider-input" id="cfgConcurrency" name="proxy_test_concurrency"
+                       min="5" max="150" step="1" value="60" oninput="updateSlider('Concurrency')"
+                       aria-describedby="concHint">
+              </div>
+              <span class="field-hint" id="concHint">Residential / CPE links: keep this at 15–25 or every probe fails.</span>
+            </div>
+
+            <div class="input-container" style="margin-bottom:18px;">
+              <label class="input-label" for="cfgWebshare">Webshare API tokens</label>
+              <textarea class="input-element" id="cfgWebshare" name="webshare_token" rows="3" spellcheck="false"
+                        placeholder="one token per line, or comma-separated"
+                        style="resize:vertical; font-family:var(--font-mono); font-size:11px; background:rgba(0,0,0,0.42);"></textarea>
+              <span class="field-hint">Stored locally in settings.json (git-ignored). Shown masked after saving.</span>
+            </div>
+
+            <div class="toggle-container" style="margin-bottom:18px;">
+              <div class="toggle-text-group">
+                <label class="toggle-label" for="cfgDirectLane">Direct connection fallback</label>
+                <span class="toggle-desc" id="directHint">Use this host's own IP when every proxy fails</span>
+              </div>
+              <span class="switch">
+                <input type="checkbox" id="cfgDirectLane" name="direct_lane" aria-describedby="directHint">
+                <span class="switch-slider" aria-hidden="true"></span>
+              </span>
+            </div>
+
+            <details class="advanced-box">
+              <summary>Advanced settings</summary>
+              <div style="display:flex; flex-direction:column; gap:16px;">
+
+                <div class="input-container">
+                  <label class="input-label" for="cfgRelayKey">Relay API key</label>
+                  <div style="display:flex; gap:8px;">
+                    <input type="password" class="input-element" id="cfgRelayKey" name="relay_api_key"
+                           placeholder="protects the relay and this dashboard" autocomplete="new-password"
+                           aria-describedby="relayKeyHint"
+                           style="flex:1; font-family:var(--font-mono); font-size:11.5px;">
+                    <button type="button" id="btnToggleRelayKey" class="ghost-btn"
+                            onclick="toggleRelayKeyVisibility()" aria-pressed="false">Show</button>
+                  </div>
+                  <span class="field-hint" id="relayKeyHint">Saving a key here applies it to the relay and stores it as this browser's key.</span>
+                </div>
+
+                <div class="toggle-container">
+                  <div class="toggle-text-group">
+                    <label class="toggle-label" for="cfgAllowSocks">Allow SOCKS sources</label>
+                    <span class="toggle-desc" id="socksHint">Include SOCKS4/5 proxies in the candidate pool</span>
+                  </div>
+                  <span class="switch">
+                    <input type="checkbox" id="cfgAllowSocks" name="allow_socks" aria-describedby="socksHint">
+                    <span class="switch-slider" aria-hidden="true"></span>
+                  </span>
+                </div>
+
+                <div class="toggle-container">
+                  <div class="toggle-text-group">
+                    <label class="toggle-label" for="cfgAdaptive">Adaptive concurrency</label>
+                    <span class="toggle-desc" id="adaptHint">Back off automatically when probes fail en masse</span>
+                  </div>
+                  <span class="switch">
+                    <input type="checkbox" id="cfgAdaptive" name="adaptive_concurrency" aria-describedby="adaptHint">
+                    <span class="switch-slider" aria-hidden="true"></span>
+                  </span>
+                </div>
+
+                <div class="toggle-container">
+                  <div class="toggle-text-group">
+                    <label class="toggle-label" for="cfgPersist">Remember lanes across restarts</label>
+                    <span class="toggle-desc" id="persistHint">Warm-start from lanes.json instead of rebuilding the pool</span>
+                  </div>
+                  <span class="switch">
+                    <input type="checkbox" id="cfgPersist" name="persist_lanes" aria-describedby="persistHint">
+                    <span class="switch-slider" aria-hidden="true"></span>
+                  </span>
+                </div>
+
+                <div class="advanced-grid">
+                  <div class="input-container">
+                    <label class="input-label" for="cfgLaneInflight">Per-lane concurrency</label>
+                    <input type="number" class="input-element" id="cfgLaneInflight" name="lane_max_inflight"
+                           min="1" max="10" step="1" value="2" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgLaneInflight" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgLaneInflight" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgSubnetCap">Max lanes per /24</label>
+                    <input type="number" class="input-element" id="cfgSubnetCap" name="max_lanes_per_subnet"
+                           min="1" max="20" step="1" value="3" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgSubnetCap" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgSubnetCap" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgMaxCandidates">Max candidates</label>
+                    <input type="number" class="input-element" id="cfgMaxCandidates" name="proxy_max_candidates"
+                           min="100" max="10000" step="100" value="3000" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgMaxCandidates" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgMaxCandidates" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgProbeTimeout">Probe timeout (s)</label>
+                    <input type="number" class="input-element" id="cfgProbeTimeout" name="proxy_probe_timeout"
+                           min="5" max="60" step="1" value="25" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgProbeTimeout" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgProbeTimeout" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgRelayTimeout">Relay timeout (s)</label>
+                    <input type="number" class="input-element" id="cfgRelayTimeout" name="relay_proxy_timeout"
+                           min="10" max="120" step="1" value="40" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgRelayTimeout" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgRelayTimeout" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgRelayAttempts">Relay attempts</label>
+                    <input type="number" class="input-element" id="cfgRelayAttempts" name="relay_attempts"
+                           min="1" max="12" step="1" value="6" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgRelayAttempts" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgRelayAttempts" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgCooldownSec">Lane cooldown (s)</label>
+                    <input type="number" class="input-element" id="cfgCooldownSec" name="lane_cooldown_sec"
+                           min="10" max="3600" step="1" value="90" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgCooldownSec" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgCooldownSec" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgRecoverSec">Lane recover (s)</label>
+                    <input type="number" class="input-element" id="cfgRecoverSec" name="lane_recover_sec"
+                           min="30" max="7200" step="1" value="240" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgRecoverSec" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgRecoverSec" aria-live="polite"></span>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <div style="display:flex; gap:12px; margin-top:22px;">
+              <button type="submit" class="action-btn" id="btnApply" style="flex:1;">Apply &amp; save</button>
+              <button type="button" class="action-btn" id="btnValidate" onclick="triggerKeyValidation()"
+                      style="flex:1; background:rgba(255,255,255,0.05); border:1px solid var(--surface-border-hi); color:var(--text);">Validate keys</button>
+            </div>
+
+            <div id="keyValidationPanel" style="margin-top:16px; display:none;"
+                 class="diag-verdict" role="status" aria-live="polite">
+              <div style="width:100%;">
+                <h3 style="font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-muted); margin-bottom:8px;">Key verification</h3>
+                <div id="valResultUpstream" style="font-family:var(--font-mono); font-size:11.5px; margin-bottom:8px;">Upstream: pending</div>
+                <div id="valResultWebshareList" style="display:flex; flex-direction:column; gap:6px; font-family:var(--font-mono); font-size:11.5px;"></div>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <!-- Logs -->
+        <section class="card" aria-labelledby="h-logs">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
+            <h2 id="h-logs" class="card-title" style="margin-bottom:0;">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+              Telemetry trace
+            </h2>
+            <div class="log-toolbar">
+              <label class="input-label" for="logFilter" style="text-transform:none; letter-spacing:0;">Filter</label>
+              <input type="search" id="logFilter" class="input-element" placeholder="substring…"
+                     oninput="renderLogs()" style="width:130px; padding:5px 9px; font-size:11px;">
+              <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:5px; cursor:pointer;">
+                <input type="checkbox" id="logErrorsOnly" onchange="renderLogs()" style="accent-color:#ff8a90; cursor:pointer;">
+                Errors only
+              </label>
+              <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:5px; cursor:pointer;">
+                <input type="checkbox" id="logAutoscroll" checked style="accent-color:#86ccff; cursor:pointer;">
+                Auto-scroll
+              </label>
+              <button type="button" class="ghost-btn sm" onclick="copyLogs()">Copy</button>
+              <button type="button" class="ghost-btn sm" onclick="clearLogs()">Clear</button>
+            </div>
           </div>
-          <div style="display: flex; gap: 8px; align-items: center;">
-            <label style="font-size: 10px; font-family: var(--font-mono); color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 4px; user-select: none;">
-              <input type="checkbox" id="logAutoscroll" checked style="accent-color: #60a5fa; cursor: pointer;">
-              Auto-scroll
-            </label>
-            <button onclick="clearLogs()" style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 3px 8px; font-size: 10px; font-family: var(--font-mono); color: #e4e4e7; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.background='rgba(255,255,255,0.04)'">Clear</button>
+          <div class="terminal-wrapper" id="terminalLogs" tabindex="0" role="log" aria-label="Live relay log">
+            <div class="log-entry"><span class="log-time">[system]</span>Listening for telemetry…</div>
           </div>
-        </div>
-        <div class="terminal-wrapper" id="terminalLogs">
-          <div class="log-entry"><span class="log-time">[System]</span>Listening for telemetry...</div>
-        </div>
+        </section>
       </div>
     </div>
+  </main>
+
+  <footer class="site-footer">
+    <span>ip-relay v__VERSION__ — provider-agnostic egress rotator</span>
+    <span id="footStatus">—</span>
+  </footer>
+</div>
+
+<!-- ══ Auth modal ══════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="authModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle" aria-describedby="authDesc">
+    <h2 id="authTitle">Relay key required</h2>
+    <p class="modal-sub" id="authDesc">The relay rejected this request (401). Enter the relay API key to reconnect — live updates resume automatically.</p>
+    <div class="input-container" style="margin-bottom:14px;">
+      <label class="input-label" for="authKeyInput">Relay API key</label>
+      <input type="password" id="authKeyInput" class="input-element" placeholder="paste key"
+             autocomplete="new-password" style="font-family:var(--font-mono); font-size:12px;">
+    </div>
+    <button type="button" onclick="saveAuthKey()" class="action-btn" style="width:100%;">Save &amp; retry</button>
   </div>
 </div>
 
-<div id="authModal" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); z-index: 200; align-items: center; justify-content: center;">
-  <div style="background: #121212; border: 1px solid rgba(255,255,255,0.12); border-radius: 16px; padding: 24px; max-width: 380px; width: 90%; box-shadow: 0 20px 60px rgba(0,0,0,0.6);">
-    <div style="font-size: 14px; font-weight: 600; margin-bottom: 6px;">Relay key required</div>
-    <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 14px; line-height: 1.6;">The relay rejected the dashboard request (401). Enter the relay API key to reconnect — polls resume automatically.</div>
-    <input type="password" id="authKeyInput" class="input-element" placeholder="Relay API key" style="width: 100%; margin-bottom: 14px; font-family: var(--font-mono); font-size: 12px;" autocomplete="new-password">
-    <button type="button" onclick="saveAuthKey()" class="action-btn" style="padding: 10px;">Save &amp; Retry</button>
+<!-- ══ Provider profile modal ═════════════════════════════════ -->
+<div class="modal-backdrop" id="profileModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="profTitle" aria-describedby="profDesc">
+    <h2 id="profTitle">Provider setup</h2>
+    <p class="modal-sub" id="profDesc">Pick an upstream to preload its base URL and probe model. Your API key is never overwritten with a blank.</p>
+    <div class="profile-list" id="profileList"></div>
+    <button type="button" class="ghost-btn" onclick="closeProfiles()" style="width:100%;">Close</button>
   </div>
 </div>
 
 <div class="toast-container" id="toastContainer"></div>
-
 <script>
-// WebGL Liquid Metal Shader (Simulates metal.jakubantalik.com backdrop)
-const canvas = document.getElementById('canvas-bg');
-const gl = canvas.getContext('webgl');
+/* ═══════════════════════════════════════════════════════════════
+   ip-relay dashboard runtime
+   - single SSE connection replaces three polling loops (poll fallback kept)
+   - respects prefers-reduced-motion in JS, not just CSS
+   - every dynamic string goes through esc() before touching innerHTML
+   ═══════════════════════════════════════════════════════════════ */
 
-const vs = `
-  attribute vec2 position;
-  void main() {
-    gl_Position = vec4(position, 0.0, 1.0);
-  }
-`;
+const REDUCED_MOTION = window.matchMedia
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-const fs = `
-  precision highp float;
-  uniform vec2 u_resolution;
-  uniform float u_time;
-
-  // Visual metal shader utilizing layered sine waves + dynamic fresnel highlights
-  void main() {
-    vec2 uv = gl_FragCoord.xy / u_resolution.xy;
-    vec2 p = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
-    
-    // Wave calculations to simulate fluid motion
-    float t = u_time * 0.22;
-    for(float i = 1.0; i < 4.0; i++) {
-      p.x += sin(p.y + t + i * 0.5) * 0.18 / i;
-      p.y += cos(p.x - t + i * 0.3) * 0.15 / i;
-    }
-    
-    // Compute normal vectors from the displacement field
-    float d = sin(p.x * 2.5 + t) * cos(p.y * 2.5 - t);
-    vec3 normal = normalize(vec3(d * 0.5, d * 0.3, 1.0));
-    
-    // Define metallic reflection light values
-    vec3 lightDir = normalize(vec3(0.5, 0.8, 1.2));
-    float spec = pow(max(dot(normal, lightDir), 0.0), 32.0);
-    float diffuse = max(dot(normal, lightDir), 0.0) * 0.2;
-    
-    // Iridescent spectrum colors derived from Jakub's color profile
-    vec3 color_blue = vec3(0.66, 0.91, 1.0); // #aae8ff
-    vec3 color_cream = vec3(0.86, 0.82, 0.74); // #dcd2bc
-    vec3 color_metal = vec3(0.04, 0.04, 0.04);
-    
-    // Merge metallic base color with spectrum reflections
-    float mix_val = clamp(normal.x * 0.5 + 0.5, 0.0, 1.0);
-    vec3 iridescence = mix(color_blue, color_cream, mix_val) * (spec + 0.12);
-    
-    // Dark core ambient layout matching Jakub's background color
-    vec3 background = vec3(0.027, 0.027, 0.027); // #070707
-    vec3 finalColor = background + iridescence + diffuse * 0.05;
-    
-    gl_FragColor = vec4(finalColor, 1.0);
-  }
-`;
-
-function initShader() {
-  if (!gl) return;
-  
-  function createShader(gl, type, source) {
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    return shader;
-  }
-  
-  const program = gl.createProgram();
-  gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, vs));
-  gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, fs));
-  gl.linkProgram(program);
-  gl.useProgram(program);
-  
-  const posLoc = gl.getAttribLocation(program, 'position');
-  const buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(posLoc);
-  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
-  
-  const resLoc = gl.getUniformLocation(program, 'u_resolution');
-  const timeLoc = gl.getUniformLocation(program, 'u_time');
-  
-  function resize() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    gl.viewport(0, 0, canvas.width, canvas.height);
-  }
-  window.addEventListener('resize', resize);
-  resize();
-  
-  function render(time) {
-    gl.uniform2f(resLoc, canvas.width, canvas.height);
-    gl.uniform1f(timeLoc, time * 0.001);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-    requestAnimationFrame(render);
-  }
-  requestAnimationFrame(render);
-}
-initShader();
-
-// Guide blocks mapping (dynamic host calculation + live settings)
-let currentGuideTab = 'curl';
 const originHost = window.location.origin;
-let liveModel = 'deepseek-v4-flash-free';
-let guideKey = 'public';
 
-function guideAuthValue() {
-  // When a relay key is stored, hint the user to use it; otherwise show the
-  // upstream key (server returns it masked, i.e. contains '...').
-  return localStorage.getItem('relay_key') ? '<your key>' : guideKey;
+/* ── announcements for screen readers ────────────────────────── */
+function announce(msg, assertive) {
+  const el = document.getElementById(assertive ? 'alertRegion' : 'liveRegion');
+  if (el) el.textContent = msg;
 }
 
-const guideSnippets = {
-  curl: () => `curl ${originHost}/v1/chat/completions \\
-  -H "Authorization: Bearer ${guideAuthValue()}" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${liveModel}",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'`,
-  claude: () => `# Export these variables in your shell before starting Claude Code:
-export ANTHROPIC_BASE_URL="${originHost}/v1"
-export ANTHROPIC_AUTH_TOKEN="${guideAuthValue()}"
-export ANTHROPIC_CUSTOM_MODEL_OPTION="${liveModel}"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="${liveModel}"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="${liveModel}"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="${liveModel}"
-export CLAUDE_CODE_SUBAGENT_MODEL="${liveModel}"
-
-# Then run: claude`,
-  python: () => `import openai
-
-client = openai.OpenAI(
-    base_url="${originHost}/v1",
-    api_key="${guideAuthValue()}"
-)
-
-response = client.chat.completions.create(
-    model="${liveModel}",
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-print(response.choices[0].message.content)`,
-  router: () => `# 9router integration settings:
-{
-  "name": "openai-compatible-chat-oc-rotator",
-  "prefix": "ocr",
-  "baseUrl": "${originHost}/v1",
-  "apiKey": "${guideAuthValue()}",
-  "models": ["${liveModel}"]
-}`
-};
-
-function switchGuide(tab) {
-  currentGuideTab = tab;
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.innerText.toLowerCase().includes(tab));
-  });
-  renderGuide();
-}
-
-function renderGuide() {
-  const el = document.getElementById('codeBlock');
-  if (el) el.innerText = guideSnippets[currentGuideTab]();
-}
-
-// XSS-safe escaping for any string interpolated into innerHTML
+/* ── XSS-safe escaping ──────────────────────────────────────── */
 function esc(s) {
   return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// Clipboard with fallback for non-secure contexts
+/* ── clipboard with non-secure-context fallback ─────────────── */
 function fallbackCopy(text) {
   try {
     const ta = document.createElement('textarea');
@@ -1298,9 +1187,7 @@ function fallbackCopy(text) {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
     return ok;
-  } catch (e) {
-    return false;
-  }
+  } catch (e) { return false; }
 }
 
 function copyText(text, successMsg) {
@@ -1311,77 +1198,179 @@ function copyText(text, successMsg) {
     navigator.clipboard.writeText(text).then(done).catch(() => {
       if (fallbackCopy(text)) done(); else fail();
     });
-  } else if (fallbackCopy(text)) {
-    done();
-  } else {
-    fail();
-  }
+  } else if (fallbackCopy(text)) { done(); } else { fail(); }
 }
 
-function copyCode() {
-  const el = document.getElementById('codeBlock');
-  if (el) copyText(el.innerText, 'Code snippet copied to clipboard');
-}
-
-function copyBaseUrl() {
-  const hostVal = document.getElementById('baseUrlVal').innerText;
-  copyText(hostVal, 'Base URL copied to clipboard');
-}
-
-let lastToastMsg = '';
-let lastToastAt = 0;
+/* ── toasts ─────────────────────────────────────────────────── */
+let lastToastMsg = '', lastToastAt = 0;
 function showToast(msg, variant) {
   const container = document.getElementById('toastContainer');
   if (!container) return;
   variant = variant || 'info';
   const now = Date.now();
-  if (msg === lastToastMsg && now - lastToastAt < 3000) return; // dedupe identical toasts
-  lastToastMsg = msg;
-  lastToastAt = now;
-  
-  // Cap the stack so it never grows unbounded
-  while (container.children.length >= 3) {
-    container.firstChild.remove();
-  }
-  
+  if (msg === lastToastMsg && now - lastToastAt < 3000) return;
+  lastToastMsg = msg; lastToastAt = now;
+  while (container.children.length >= 3) container.firstChild.remove();
+
   const toast = document.createElement('div');
   toast.className = 'toast ' + variant;
-  const icon = variant === 'danger' ? '<path d="M18 6L6 18"/><path d="M6 6l12 12"/>' :
-               variant === 'success' ? '<path d="M20 6L9 17l-5-5"/>' :
-               '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>';
-  toast.innerHTML = `
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5">${icon}</svg>
-    <span>${esc(msg)}</span>
-  `;
+  const icon = variant === 'danger' ? '<path d="M18 6L6 18"/><path d="M6 6l12 12"/>'
+    : variant === 'success' ? '<path d="M20 6L9 17l-5-5"/>'
+    : '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>';
+  toast.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">'
+    + icon + '</svg><span>' + esc(msg) + '</span>';
   container.appendChild(toast);
+  announce(msg, variant === 'danger');
   setTimeout(() => {
     toast.style.opacity = '0';
     toast.style.transform = 'translateY(10px)';
     setTimeout(() => toast.remove(), 300);
-  }, 2500);
+  }, 2600);
 }
 
-// Drag sliders updates
-function updateSlider(name) {
-  const input = document.getElementById('cfg' + name);
-  const fill = document.getElementById('fill' + name);
-  const val = document.getElementById('val' + name);
-  if (!input || !fill || !val) return;
-  
-  const min = parseFloat(input.min);
-  const max = parseFloat(input.max);
-  const v = parseFloat(input.value);
-  if (!isFinite(min) || !isFinite(max) || max <= min || !isFinite(v)) {
-    fill.style.width = '0%';
-    val.innerText = input.value || '';
+/* ── code snippets ──────────────────────────────────────────── */
+let currentGuideTab = 'curl';
+let liveModel = 'deepseek-v4-flash-free';
+let guideKey = 'public';
+
+function guideAuthValue() {
+  return localStorage.getItem('relay_key') ? '<your relay key>' : guideKey;
+}
+
+const guideSnippets = {
+  curl: () => 'curl ' + originHost + '/v1/chat/completions \\\n'
+    + '  -H "Authorization: Bearer ' + guideAuthValue() + '" \\\n'
+    + '  -H "Content-Type: application/json" \\\n'
+    + "  -d '{\n"
+    + '    "model": "' + liveModel + '",\n'
+    + '    "messages": [{"role": "user", "content": "Hello!"}]\n'
+    + "  }'",
+  claude: () => '# Export before starting Claude Code:\n'
+    + 'export ANTHROPIC_BASE_URL="' + originHost + '/v1"\n'
+    + 'export ANTHROPIC_AUTH_TOKEN="' + guideAuthValue() + '"\n'
+    + 'export ANTHROPIC_CUSTOM_MODEL_OPTION="' + liveModel + '"\n'
+    + 'export ANTHROPIC_DEFAULT_HAIKU_MODEL="' + liveModel + '"\n'
+    + 'export ANTHROPIC_DEFAULT_SONNET_MODEL="' + liveModel + '"\n'
+    + 'export ANTHROPIC_DEFAULT_OPUS_MODEL="' + liveModel + '"\n'
+    + 'export CLAUDE_CODE_SUBAGENT_MODEL="' + liveModel + '"\n\n'
+    + '# then run: claude',
+  python: () => 'import openai\n\n'
+    + 'client = openai.OpenAI(\n'
+    + '    base_url="' + originHost + '/v1",\n'
+    + '    api_key="' + guideAuthValue() + '",\n'
+    + ')\n\n'
+    + 'resp = client.chat.completions.create(\n'
+    + '    model="' + liveModel + '",\n'
+    + '    messages=[{"role": "user", "content": "Hello!"}],\n'
+    + ')\n'
+    + 'print(resp.choices[0].message.content)',
+  openai: () => "import OpenAI from 'openai';\n\n"
+    + 'const client = new OpenAI({\n'
+    + "  baseURL: '" + originHost + "/v1',\n"
+    + "  apiKey: '" + guideAuthValue() + "',\n"
+    + '});\n\n'
+    + 'const r = await client.chat.completions.create({\n'
+    + "  model: '" + liveModel + "',\n"
+    + "  messages: [{ role: 'user', content: 'Hello!' }],\n"
+    + '});\n'
+    + 'console.log(r.choices[0].message.content);',
+  router: () => '# 9router provider entry\n{\n'
+    + '  "name": "ip-relay",\n'
+    + '  "prefix": "ipr",\n'
+    + '  "baseUrl": "' + originHost + '/v1",\n'
+    + '  "apiKey": "' + guideAuthValue() + '",\n'
+    + '  "models": ["' + liveModel + '"]\n}',
+  env: () => '# generic OpenAI-compatible env\n'
+    + 'OPENAI_BASE_URL=' + originHost + '/v1\n'
+    + 'OPENAI_API_KEY=' + guideAuthValue() + '\n'
+    + 'OPENAI_MODEL=' + liveModel
+};
+
+function switchGuide(tab) {
+  currentGuideTab = tab;
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    const on = btn.id === 'tab-' + tab;
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  const panel = document.getElementById('codePanel');
+  if (panel) panel.setAttribute('aria-labelledby', 'tab-' + tab);
+  renderGuide();
+}
+
+function renderGuide() {
+  const el = document.getElementById('codeBlock');
+  if (el && guideSnippets[currentGuideTab]) el.textContent = guideSnippets[currentGuideTab]();
+}
+
+function copyCode() {
+  const el = document.getElementById('codeBlock');
+  if (el) copyText(el.textContent, 'Code snippet copied');
+}
+
+function copyBaseUrl() {
+  const el = document.getElementById('baseUrlVal');
+  if (el) copyText(el.textContent, 'Base URL copied');
+}
+
+/* ── keyboard support for the tablist (WAI-ARIA pattern) ────── */
+function wireTablist() {
+  const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+  tabs.forEach((tab, i) => {
+    tab.addEventListener('keydown', (e) => {
+      let next = null;
+      if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+      else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+      else if (e.key === 'Home') next = tabs[0];
+      else if (e.key === 'End') next = tabs[tabs.length - 1];
+      if (next) {
+        e.preventDefault();
+        next.focus();
+        next.click();
+      }
+    });
+  });
+}
+
+/* ── modal focus management ─────────────────────────────────── */
+let lastFocused = null;
+
+function openModal(id) {
+  lastFocused = document.activeElement;
+  const m = document.getElementById(id);
+  if (!m) return;
+  m.classList.add('open');
+  const focusable = m.querySelector('input, button, [tabindex]');
+  if (focusable) focusable.focus();
+  document.addEventListener('keydown', modalKeydown);
+}
+
+function closeModal(id) {
+  const m = document.getElementById(id);
+  if (m) m.classList.remove('open');
+  document.removeEventListener('keydown', modalKeydown);
+  if (lastFocused && lastFocused.focus) lastFocused.focus();
+}
+
+function modalKeydown(e) {
+  const open = document.querySelector('.modal-backdrop.open');
+  if (!open) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    if (open.id === 'authModal') closeAuthModal(); else closeModal(open.id);
     return;
   }
-  const pct = Math.min(100, Math.max(0, ((v - min) / (max - min)) * 100));
-  fill.style.width = pct + '%';
-  val.innerText = input.value;
+  if (e.key !== 'Tab') return;
+  // Focus trap: keep Tab inside the dialog.
+  const items = Array.from(open.querySelectorAll(
+    'a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])'
+  )).filter(el => el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 }
 
-// ── API helper with relay-key auth ─────────────────────────────
+/* ── auth handling ──────────────────────────────────────────── */
 let pollsPaused = false;
 let authModalOpen = false;
 
@@ -1390,12 +1379,7 @@ async function apiFetch(path, opts) {
   const headers = Object.assign({}, opts.headers || {});
   const key = localStorage.getItem('relay_key');
   if (key) headers['Authorization'] = 'Bearer ' + key;
-  let r;
-  try {
-    r = await fetch(path, Object.assign({}, opts, { headers }));
-  } catch (e) {
-    throw e; // network failure — caller marks stale
-  }
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
   if (r.status === 401) {
     handleUnauthorized();
     const err = new Error('unauthorized');
@@ -1407,25 +1391,22 @@ async function apiFetch(path, opts) {
 
 function handleUnauthorized() {
   pollsPaused = true;
+  if (sse) { sse.close(); sse = null; }
   if (!authModalOpen) {
     authModalOpen = true;
-    const modal = document.getElementById('authModal');
-    if (modal) modal.style.display = 'flex';
+    openModal('authModal');
   }
 }
 
 function closeAuthModal() {
   authModalOpen = false;
-  const modal = document.getElementById('authModal');
-  if (modal) modal.style.display = 'none';
+  closeModal('authModal');
 }
 
 function saveAuthKey() {
   const input = document.getElementById('authKeyInput');
   const key = (input ? input.value : '').trim();
-  if (key) {
-    localStorage.setItem('relay_key', key);
-  }
+  if (key) localStorage.setItem('relay_key', key);
   closeAuthModal();
   resumePolls();
 }
@@ -1434,62 +1415,70 @@ function resumePolls() {
   pollsPaused = false;
   loadSettings();
   refreshPool();
+  loadDiagnostics();
+  connectSSE();
 }
 
-// Stale-state tracking: mark the UI as stale on poll failures, dedupe the
-// "lost connection" toast, and show "last updated Ns ago" from the last
-// successful fetch.
+/* ── staleness tracking ─────────────────────────────────────── */
 let lastSuccessAt = 0;
 let staleToastShown = false;
+let isStale = false;
 
 function noteSuccess() {
   lastSuccessAt = Date.now();
   staleToastShown = false;
+  isStale = false;
 }
 
 function markStale() {
+  isStale = true;
   const pill = document.getElementById('statusPill');
   const txt = document.getElementById('statusText');
   if (pill) pill.className = 'status-dot error';
-  if (txt) txt.innerText = lastSuccessAt
-    ? 'STALE · ' + Math.round((Date.now() - lastSuccessAt) / 1000) + 's ago'
-    : 'STALE';
+  if (txt) txt.textContent = lastSuccessAt
+    ? 'stale · ' + Math.round((Date.now() - lastSuccessAt) / 1000) + 's ago'
+    : 'stale';
+  setFeed('down', 'disconnected');
   if (!staleToastShown) {
     staleToastShown = true;
-    showToast('Lost connection to relay server', 'danger');
+    showToast('Lost connection to the relay', 'danger');
   }
 }
 
 function onFetchError(e, ctx) {
-  if (e && e.auth) return; // 401 handled by apiFetch (auth modal)
-  console.warn(ctx + ' fetch failed:', e);
+  if (e && e.auth) return;
+  console.warn(ctx + ' failed:', e);
   markStale();
 }
 
-// Time formatting helpers
-function formatCountdown(ms) {
-  const totalSec = Math.max(0, Math.ceil(ms / 1000));
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return m > 0 ? m + 'm ' + s + 's' : s + 's';
+function setFeed(state, text) {
+  const pill = document.getElementById('feedPill');
+  const t = document.getElementById('feedText');
+  if (pill) pill.className = 'feed-pill' + (state === 'live' ? '' : ' ' + state);
+  if (t) t.textContent = text;
 }
 
+/* ── formatting helpers ─────────────────────────────────────── */
+function formatCountdown(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(s / 60);
+  return m > 0 ? m + 'm ' + (s % 60) + 's' : s + 's';
+}
 function formatDur(sec) {
   sec = Math.max(0, Math.round(sec || 0));
   const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return m > 0 ? m + 'm ' + s + 's' : s + 's';
+  return m > 0 ? m + 'm ' + (sec % 60) + 's' : sec + 's';
 }
-
 function formatUptime(sec) {
   sec = Math.max(0, Math.round(sec || 0));
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  const p = n => String(n).padStart(2, '0');
+  return h > 0 ? h + ':' + p(m) + ':' + p(s) : p(m) + ':' + p(s);
 }
-
-// ── Advanced-settings numeric validation ───────────────────────
+/* ── numeric validation ─────────────────────────────────────── */
 const NUM_FIELDS = [
+  ['cfgLaneInflight', 1, 10],
+  ['cfgSubnetCap', 1, 20],
   ['cfgMaxCandidates', 100, 10000],
   ['cfgProbeTimeout', 5, 60],
   ['cfgRelayTimeout', 10, 120],
@@ -1501,24 +1490,26 @@ const NUM_FIELDS = [
 function validateNumField(id, min, max) {
   const input = document.getElementById(id);
   if (!input) return true;
-  const errEl = document.getElementById('err' + id);
+  // The error span is 'errCfgFoo' for input 'cfgFoo' — capitalise the first
+  // letter. Naive 'err' + id yields 'errcfgFoo', silently returns null, and the
+  // user gets a disabled Apply button with no explanation of why.
+  const errEl = document.getElementById('err' + id.charAt(0).toUpperCase() + id.slice(1));
   const v = parseFloat(input.value);
   const badInput = !!(input.validity && input.validity.badInput);
   const empty = !badInput && input.value.trim() === '';
   const ok = !empty && !badInput && isFinite(v) && v >= min && v <= max;
   input.classList.toggle('input-invalid', !ok);
+  input.setAttribute('aria-invalid', ok ? 'false' : 'true');
   if (errEl) {
-    errEl.textContent = ok ? '' :
-      (empty ? 'Required' : (badInput || !isFinite(v) ? 'Must be a number' : 'Must be ' + min + '–' + max));
+    errEl.textContent = ok ? ''
+      : (empty ? 'Required' : (badInput || !isFinite(v) ? 'Must be a number' : 'Must be ' + min + '–' + max));
   }
   return ok;
 }
 
 function allFieldsValid() {
   let ok = true;
-  NUM_FIELDS.forEach(f => {
-    if (!validateNumField(f[0], f[1], f[2])) ok = false;
-  });
+  NUM_FIELDS.forEach(f => { if (!validateNumField(f[0], f[1], f[2])) ok = false; });
   return ok;
 }
 
@@ -1527,608 +1518,873 @@ function updateApplyDisabled() {
   if (btn) btn.disabled = !allFieldsValid();
 }
 
+function updateSlider(name) {
+  const input = document.getElementById('cfg' + name);
+  const fill = document.getElementById('fill' + name);
+  const val = document.getElementById('val' + name);
+  if (!input || !fill || !val) return;
+  const min = parseFloat(input.min), max = parseFloat(input.max), v = parseFloat(input.value);
+  if (!isFinite(min) || !isFinite(max) || max <= min || !isFinite(v)) {
+    fill.style.width = '0%';
+    val.textContent = input.value || '';
+    return;
+  }
+  fill.style.width = Math.min(100, Math.max(0, ((v - min) / (max - min)) * 100)) + '%';
+  val.textContent = input.value;
+}
+
 function toggleRelayKeyVisibility() {
   const input = document.getElementById('cfgRelayKey');
   const btn = document.getElementById('btnToggleRelayKey');
   if (!input || !btn) return;
   const show = input.type === 'password';
   input.type = show ? 'text' : 'password';
-  btn.innerText = show ? 'Hide' : 'Show';
+  btn.textContent = show ? 'Hide' : 'Show';
+  btn.setAttribute('aria-pressed', show ? 'true' : 'false');
 }
 
-// ── Per-second dashboard tick: parked countdowns + stale ticker ─
+/* ── per-second tick ────────────────────────────────────────── */
 function tickDashboard() {
   document.querySelectorAll('.parked-countdown').forEach(el => {
     const deadline = parseFloat(el.getAttribute('data-deadline') || '0') || 0;
     const remain = deadline - Date.now();
-    el.innerText = remain > 0 ? formatCountdown(remain) : 'now';
+    el.textContent = remain > 0 ? formatCountdown(remain) : 'now';
   });
   const pill = document.getElementById('statusPill');
-  if (pill && pill.classList.contains('error') && lastSuccessAt) {
+  if (isStale && lastSuccessAt) {
     const txt = document.getElementById('statusText');
-    if (txt) txt.innerText = 'STALE · ' + Math.round((Date.now() - lastSuccessAt) / 1000) + 's ago';
+    if (txt) txt.textContent = 'stale · ' + Math.round((Date.now() - lastSuccessAt) / 1000) + 's ago';
   }
 }
 
-// ── Proxy refresh button ───────────────────────────────────────
+/* ── refresh button ─────────────────────────────────────────── */
 async function refreshProxies() {
   const btn = document.getElementById('btnRefresh');
-  if (btn) {
-    btn.disabled = true;
-    btn.innerText = 'Refreshing...';
-  }
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
   try {
     const r = await apiFetch('/api/refresh', { method: 'POST' });
     if (!r.ok) {
-      console.warn('refreshProxies: HTTP', r.status);
       markStale();
       showToast('Proxy refresh failed (HTTP ' + r.status + ')', 'danger');
       return;
     }
     const d = await r.json();
-    showToast('Proxy refresh queued: ' + (d.queue ?? 0) + ' candidates, ' + (d.sources_ok ?? 0) + ' sources OK', 'success');
+    showToast('Refresh queued: ' + (d.queue ?? 0) + ' candidates, ' + (d.sources_ok ?? 0) + ' sources ok', 'success');
   } catch (e) {
     onFetchError(e, 'refreshProxies');
     if (!(e && e.auth)) showToast('Proxy refresh request failed', 'danger');
   } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.innerText = 'Refresh proxies now';
-    }
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh proxies now'; }
   }
 }
 
-// Stats & configuration synchronization
+/* ── settings ───────────────────────────────────────────────── */
 let settingsHydrated = false;
 let settingsSeq = 0;
-let poolTarget = 25;
+let poolTarget = 30;
+
+function setVal(id, v) {
+  const el = document.getElementById(id);
+  if (el) el.value = v;
+}
+function setChecked(id, v) {
+  const el = document.getElementById(id);
+  if (el) el.checked = !!v;
+}
 
 async function loadSettings() {
   if (pollsPaused) return;
-  const seq = settingsSeq; // stale-response guard: skip hydration if the user edited meanwhile
+  const seq = settingsSeq;
   try {
     const r = await apiFetch('/api/stats');
-    if (!r.ok) {
-      console.warn('loadSettings: HTTP', r.status);
-      markStale();
-      return;
-    }
+    if (!r.ok) { markStale(); return; }
     const d = await r.json();
     noteSuccess();
-    
-    // Set dynamic Base URL chip (always)
-    document.getElementById('baseUrlVal').innerText = originHost + '/v1';
-    
-    // Live values consumed by the engine-state pill and guide snippets
+
+    const base = document.getElementById('baseUrlVal');
+    if (base) base.textContent = originHost + '/v1';
+
     const s = d.settings || {};
-    poolTarget = Number(s.proxy_pool_target) || 25;
+    poolTarget = Number(s.proxy_pool_target) || 30;
     if (s.probe_model) liveModel = s.probe_model;
     if (s.upstream_api_key) guideKey = s.upstream_api_key;
-    
-    // Hydrate form fields ONLY on first load — never overwrite what the
-    // user is typing/editing on subsequent polls. ?? defaults for every key.
+
     if (!settingsHydrated && seq === settingsSeq) {
-      document.getElementById('cfgUpstreamUrl').value = s.upstream_base_url ?? '';
-      const upKey = s.upstream_api_key ?? '';
-      document.getElementById('cfgUpstreamKey').value =
-        (upKey.includes('...') || upKey === '(none)') ? '' : upKey;
-      document.getElementById('cfgProbeModel').value = s.probe_model ?? '';
-      
-      // Sliders
-      document.getElementById('cfgPoolTarget').value = s.proxy_pool_target ?? 30;
-      updateSlider('PoolTarget');
-      document.getElementById('cfgConcurrency').value = s.proxy_test_concurrency ?? 60;
-      updateSlider('Concurrency');
-      
-      // Inputs & toggles
-      const wsToken = s.webshare_token ?? '';
-      // If the server returns a masked value (contains '...'), show an empty
-      // field so the user can type a new key without fighting the mask.
-      document.getElementById('cfgWebshare').value =
-        (wsToken.includes('...') || wsToken === '(none)') ? '' : wsToken;
-      document.getElementById('cfgDirectLane').checked = s.direct_lane ?? false;
-      
-      // Advanced settings (masked relay key is passed through as-is)
-      document.getElementById('cfgRelayKey').value = s.relay_api_key ?? '';
-      document.getElementById('cfgAllowSocks').checked = s.allow_socks ?? true;
-      document.getElementById('cfgMaxCandidates').value = s.proxy_max_candidates ?? 3000;
-      document.getElementById('cfgProbeTimeout').value = s.proxy_probe_timeout ?? 25;
-      document.getElementById('cfgRelayTimeout').value = s.relay_proxy_timeout ?? 40;
-      document.getElementById('cfgRelayAttempts').value = s.relay_attempts ?? 6;
-      document.getElementById('cfgCooldownSec').value = s.lane_cooldown_sec ?? 90;
-      document.getElementById('cfgRecoverSec').value = s.lane_recover_sec ?? 240;
+      setVal('cfgUpstreamUrl', s.upstream_base_url ?? '');
+      const upKey = String(s.upstream_api_key ?? '');
+      setVal('cfgUpstreamKey', (upKey.includes('...') || upKey === '(none)') ? '' : upKey);
+      setVal('cfgProbeModel', s.probe_model ?? '');
+      setVal('cfgPoolTarget', s.proxy_pool_target ?? 30); updateSlider('PoolTarget');
+      setVal('cfgConcurrency', s.proxy_test_concurrency ?? 60); updateSlider('Concurrency');
+      const ws = String(s.webshare_token ?? '');
+      setVal('cfgWebshare', (ws.includes('...') || ws === '(none)') ? '' : ws);
+      setChecked('cfgDirectLane', s.direct_lane);
+      setVal('cfgRelayKey', s.relay_api_key ?? '');
+      setChecked('cfgAllowSocks', s.allow_socks ?? true);
+      setChecked('cfgAdaptive', s.adaptive_concurrency ?? true);
+      setChecked('cfgPersist', s.persist_lanes ?? true);
+      setVal('cfgLaneInflight', s.lane_max_inflight ?? 2);
+      setVal('cfgSubnetCap', s.max_lanes_per_subnet ?? 3);
+      setVal('cfgMaxCandidates', s.proxy_max_candidates ?? 3000);
+      setVal('cfgProbeTimeout', s.proxy_probe_timeout ?? 25);
+      setVal('cfgRelayTimeout', s.relay_proxy_timeout ?? 40);
+      setVal('cfgRelayAttempts', s.relay_attempts ?? 6);
+      setVal('cfgCooldownSec', s.lane_cooldown_sec ?? 90);
+      setVal('cfgRecoverSec', s.lane_recover_sec ?? 240);
       settingsHydrated = true;
       updateApplyDisabled();
+      loadModelList();
     }
-    
+
     updateTelemetry(d);
     renderGuide();
-  } catch(e) {
-    onFetchError(e, 'loadSettings');
-  }
+  } catch (e) { onFetchError(e, 'loadSettings'); }
+}
+
+async function loadModelList() {
+  try {
+    const r = await apiFetch('/v1/models');
+    if (!r.ok) return;
+    const d = await r.json();
+    const list = document.getElementById('modelList');
+    if (!list || !d.data) return;
+    list.innerHTML = d.data.slice(0, 60)
+      .map(m => '<option value="' + esc(m.id) + '"></option>').join('');
+  } catch (e) { /* model list is a nicety, never a blocker */ }
 }
 
 async function saveSettings(e) {
   e.preventDefault();
   if (!allFieldsValid()) {
-    showToast('Fix invalid settings before applying', 'danger');
+    showToast('Fix the invalid fields before applying', 'danger');
     return;
   }
-  settingsSeq++; // bump so any in-flight stats response cannot clobber the save
+  settingsSeq++;
   const btn = document.getElementById('btnApply');
-  if (btn) btn.innerText = 'Saving...';
-  
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+
+  const num = id => parseFloat(document.getElementById(id).value);
   const payload = {
     upstream_base_url: document.getElementById('cfgUpstreamUrl').value,
     upstream_api_key: document.getElementById('cfgUpstreamKey').value,
     probe_model: document.getElementById('cfgProbeModel').value,
-    proxy_pool_target: parseInt(document.getElementById('cfgPoolTarget').value),
-    proxy_test_concurrency: parseInt(document.getElementById('cfgConcurrency').value),
+    proxy_pool_target: parseInt(document.getElementById('cfgPoolTarget').value, 10),
+    proxy_test_concurrency: parseInt(document.getElementById('cfgConcurrency').value, 10),
     webshare_token: document.getElementById('cfgWebshare').value,
     direct_lane: document.getElementById('cfgDirectLane').checked,
     relay_api_key: document.getElementById('cfgRelayKey').value,
     allow_socks: document.getElementById('cfgAllowSocks').checked,
-    proxy_max_candidates: parseFloat(document.getElementById('cfgMaxCandidates').value),
-    proxy_probe_timeout: parseFloat(document.getElementById('cfgProbeTimeout').value),
-    relay_proxy_timeout: parseFloat(document.getElementById('cfgRelayTimeout').value),
-    relay_attempts: parseFloat(document.getElementById('cfgRelayAttempts').value),
-    lane_cooldown_sec: parseFloat(document.getElementById('cfgCooldownSec').value),
-    lane_recover_sec: parseFloat(document.getElementById('cfgRecoverSec').value)
+    adaptive_concurrency: document.getElementById('cfgAdaptive').checked,
+    persist_lanes: document.getElementById('cfgPersist').checked,
+    lane_max_inflight: num('cfgLaneInflight'),
+    max_lanes_per_subnet: num('cfgSubnetCap'),
+    proxy_max_candidates: num('cfgMaxCandidates'),
+    proxy_probe_timeout: num('cfgProbeTimeout'),
+    relay_proxy_timeout: num('cfgRelayTimeout'),
+    relay_attempts: num('cfgRelayAttempts'),
+    lane_cooldown_sec: num('cfgCooldownSec'),
+    lane_recover_sec: num('cfgRecoverSec')
   };
-  
-  // Saving a real (unmasked) relay key applies to the relay AND becomes the
-  // dashboard key; masked '...' values are sent verbatim and ignored by the
-  // backend. An empty field removes the stored dashboard key.
+
   const relayKeyVal = String(document.getElementById('cfgRelayKey').value).trim();
   if (relayKeyVal && !relayKeyVal.includes('...') && relayKeyVal !== '(none)') {
     localStorage.setItem('relay_key', relayKeyVal);
   } else if (!relayKeyVal) {
     localStorage.removeItem('relay_key');
   }
-  
+
   try {
     const r = await apiFetch('/api/settings', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
     if (r.ok) {
-      showToast("Settings saved successfully! Resetting proxy scraper...", "success");
+      showToast('Settings saved — rescanning proxies', 'success');
       resumePolls();
-      // Run key validation to update health pills and status cards
       triggerKeyValidation();
     } else {
-      showToast("Error updating settings", "danger");
+      let detail = '';
+      try {
+        const err = await r.json();
+        if (err.details) detail = ': ' + Object.values(err.details).join('; ');
+      } catch (_) { /* body was not json */ }
+      showToast('Settings rejected (HTTP ' + r.status + ')' + detail, 'danger');
     }
-  } catch(e) {
-    onFetchError(e, 'saveSettings');
-    if (!(e && e.auth)) showToast("Server request failed", "danger");
+  } catch (err) {
+    onFetchError(err, 'saveSettings');
+    if (!(err && err.auth)) showToast('Save request failed', 'danger');
   } finally {
-    if (btn) btn.innerText = 'Apply & Save';
+    if (btn) { btn.disabled = false; btn.textContent = 'Apply & save'; }
   }
 }
 
-// Key verification dry-run and health status
+/* ── provider profiles ──────────────────────────────────────── */
+async function openProfiles() {
+  openModal('profileModal');
+  const list = document.getElementById('profileList');
+  if (!list) return;
+  list.innerHTML = '<p style="font-size:12px;color:var(--text-muted)">Loading…</p>';
+  try {
+    const r = await apiFetch('/api/profiles');
+    if (!r.ok) { list.innerHTML = '<p style="font-size:12px;color:var(--bad)">Could not load profiles.</p>'; return; }
+    const d = await r.json();
+    list.innerHTML = (d.profiles || []).map(p =>
+      '<button type="button" class="profile-item" onclick="applyProfile(\'' + esc(p.id) + '\')">'
+      + '<span class="pname">' + esc(p.label) + '</span>'
+      + '<span class="pnote">' + esc(p.note || '') + '</span>'
+      + '<span class="purl">' + esc(p.upstream_base_url || '(set your own base URL)') + '</span>'
+      + '</button>').join('');
+  } catch (e) {
+    onFetchError(e, 'openProfiles');
+  }
+}
+
+function closeProfiles() { closeModal('profileModal'); }
+
+async function applyProfile(id) {
+  try {
+    const r = await apiFetch('/api/profiles/' + encodeURIComponent(id), { method: 'POST' });
+    if (!r.ok) { showToast('Could not apply profile (HTTP ' + r.status + ')', 'danger'); return; }
+    const d = await r.json();
+    settingsHydrated = false;   // re-hydrate the form from the new upstream
+    closeProfiles();
+    showToast('Applied profile: ' + id, 'success');
+    if (d.note) announce(d.note);
+    loadSettings();
+  } catch (e) { onFetchError(e, 'applyProfile'); }
+}
+
+/* ── key validation ─────────────────────────────────────────── */
 async function triggerKeyValidation() {
   const btn = document.getElementById('btnValidate');
   const panel = document.getElementById('keyValidationPanel');
   const valUpstream = document.getElementById('valResultUpstream');
   const valWebshare = document.getElementById('valResultWebshareList');
-  
-  if (btn) btn.innerText = 'Validating...';
+  if (btn) { btn.disabled = true; btn.textContent = 'Validating…'; }
   if (panel) panel.style.display = 'block';
-  
   try {
     const payload = {
       upstream_base_url: document.getElementById('cfgUpstreamUrl').value,
       upstream_api_key: document.getElementById('cfgUpstreamKey').value,
       webshare_token: document.getElementById('cfgWebshare').value
     };
-    
     const r = await apiFetch('/api/keys/validate', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-    if (!r.ok) {
-      console.warn('triggerKeyValidation: HTTP', r.status);
-      markStale();
-      return;
-    }
-    
+    if (!r.ok) { markStale(); return; }
     const d = await r.json();
-    
-    // Upstream URL & Key
-    if (d.upstream) {
+    if (d.upstream && valUpstream) {
       const up = d.upstream;
-      valUpstream.innerHTML = `
-        <span style="color: #a1a1aa;">Upstream:</span>
-        <span class="val-status" style="color: ${up.valid ? '#4ade80' : '#f87171'}; font-weight: bold;">
-          ${up.valid ? '✓ VALID (' + esc(up.models_count) + ' models)' : '✗ FAILED (' + esc(up.error) + ')'}
-        </span>
-      `;
+      valUpstream.innerHTML = 'Upstream: <span class="chip ' + (up.valid ? 'ok' : 'bad') + '">'
+        + (up.valid ? 'valid · ' + esc(up.models_count) + ' models' : 'failed · ' + esc(up.error))
+        + '</span>';
     }
-    
-    // Webshare Keys
-    if (d.webshare && Array.isArray(d.webshare)) {
-      if (d.webshare.length === 0) {
-        valWebshare.innerHTML = '<div style="color: var(--text-muted); font-size: 10px;">No Webshare accounts configured.</div>';
-      } else {
-        valWebshare.innerHTML = d.webshare.map((w, idx) => `
-          <div style="display: flex; align-items: center; justify-content: space-between; padding: 4px 0; border-top: 1px solid rgba(255,255,255,0.04);">
-            <span style="color: #a1a1aa;">Webshare Key #${idx+1} (${esc(w.token)}):</span>
-            <span style="color: ${w.valid ? '#4ade80' : '#f87171'}; font-weight: bold;">
-              ${w.valid ? '✓ VALID (' + esc(w.proxies) + ' proxies)' : '✗ INVALID (' + esc(w.error) + ')'}
-            </span>
-          </div>
-        `).join('');
-      }
+    if (valWebshare && Array.isArray(d.webshare)) {
+      valWebshare.innerHTML = d.webshare.length === 0
+        ? '<span style="color:var(--text-muted)">No Webshare accounts configured.</span>'
+        : d.webshare.map((w, i) =>
+            '<span>Key #' + (i + 1) + ' (' + esc(w.token) + '): <span class="chip '
+            + (w.valid ? 'ok' : 'bad') + '">'
+            + (w.valid ? esc(w.proxies) + ' proxies' : esc(w.error)) + '</span></span>').join('');
     }
-  } catch(e) {
+  } catch (e) {
     onFetchError(e, 'triggerKeyValidation');
-    if (!(e && e.auth)) showToast("Key validation failed: " + e.message, "danger");
+    if (!(e && e.auth)) showToast('Key validation failed', 'danger');
   } finally {
-    if (btn) btn.innerText = 'Validate Keys';
+    if (btn) { btn.disabled = false; btn.textContent = 'Validate keys'; }
   }
 }
 
-// Clear trace logs
-function clearLogs() {
-  const terminal = document.getElementById('terminalLogs');
-  if (terminal) {
-    terminal.innerHTML = '<div class="log-entry"><span class="log-time">[System]</span>Trace log cleared.</div>';
+/* ── diagnostics ────────────────────────────────────────────── */
+const VERDICT_CLASS = {
+  healthy: 'ok', warming_up: 'warn', quota_exhausted: 'warn',
+  egress_blocked: 'bad', bad_upstream_key: 'bad',
+  upstream_blocks_proxies: 'bad', no_usable_proxies: 'bad'
+};
+
+async function loadDiagnostics(manual) {
+  if (pollsPaused) return;
+  try {
+    const r = await apiFetch('/api/diagnostics');
+    if (!r.ok) { markStale(); return; }
+    const d = await r.json();
+    noteSuccess();
+
+    const box = document.getElementById('diagVerdict');
+    const title = document.getElementById('diagTitle');
+    const advice = document.getElementById('diagAdvice');
+    if (box) box.className = 'diag-verdict ' + (VERDICT_CLASS[d.verdict] || '');
+    if (title) title.textContent = String(d.verdict || '').replace(/_/g, ' ');
+    if (advice) advice.textContent = d.advice || '';
+
+    const warn = document.getElementById('diagWarnings');
+    if (warn) {
+      const items = (d.config_warnings || []);
+      warn.innerHTML = items.length
+        ? items.map(w => '<li>' + esc(w) + '</li>').join('')
+        : '<li style="padding-left:0">No configuration warnings.</li>';
+      if (!items.length) warn.querySelector('li').style.color = 'var(--ok)';
+    }
+
+    const reasons = d.probe_failures || {};
+    const keys = Object.keys(reasons);
+    const grid = document.getElementById('diagReasons');
+    if (grid) {
+      grid.innerHTML = keys.length
+        ? keys.sort((a, b) => reasons[b] - reasons[a]).map(k =>
+            '<div class="reason-cell"><span class="n">' + esc(reasons[k]) + '</span>'
+            + '<span class="k">' + esc(k.replace(/_/g, ' ')) + '</span></div>').join('')
+        : '<div class="reason-cell"><span class="n">0</span><span class="k">no probe failures</span></div>';
+    }
+    if (manual) showToast('Diagnostics refreshed', 'success');
+  } catch (e) { onFetchError(e, 'loadDiagnostics'); }
+}
+/* ── telemetry rendering ────────────────────────────────────── */
+function setStat(id, value) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const next = String(value);
+  if (el.textContent !== next) {
+    el.textContent = next;
+    if (!REDUCED_MOTION) {
+      el.classList.remove('flash');
+      void el.offsetWidth;         // restart the animation
+      el.classList.add('flash');
+    }
   }
 }
 
-// Log badge formatting
-function formatLogLine(line) {
-  let color = '#e4e4e7';
-  if (line.includes('Scraper:')) color = '#60a5fa'; // Blue
-  else if (line.includes('Prober: +Lane')) color = '#34d399'; // Emerald
-  else if (line.includes('Prober:')) color = '#a78bfa'; // Purple
-  else if (line.includes('Settings:')) color = '#facc15'; // Amber
-  else if (line.includes('churn:') || line.includes('sources:')) color = '#38bdf8'; // Sky Blue
-  else if (line.includes('burned') || line.includes('error') || line.includes('fail')) color = '#f87171'; // Red
-
-  const parts = line.split(' | ');
-  let timeStr = '';
-  let msg = line;
-  if (parts.length >= 3) {
-    timeStr = parts[0];
-    msg = parts.slice(2).join(' | ');
-  } else {
-    timeStr = new Date().toLocaleTimeString();
-  }
-  return `<div class="log-entry"><span class="log-time">[${esc(timeStr)}]</span><span style="color: ${color};">${esc(msg)}</span></div>`;
-}
-
-// Dynamic telemetry UI updates
+let lastWarmCount = -1;
 
 function updateTelemetry(data) {
   const pool = data.pool || {};
   const stats = data.stats || {};
-  
-  // Counters
-  document.getElementById('cWarm').innerText = pool.warm ?? 0;
-  document.getElementById('cParked').innerText = pool.parked ?? 0;
-  document.getElementById('cRequests').innerText = stats.requests ?? 0;
-  document.getElementById('cFailovers').innerText = stats.failovers ?? 0;
-  
-  // Extended stats
-  document.getElementById('statUptime').innerText = formatUptime(data.uptime_sec);
-  document.getElementById('statSources').innerText = pool.sources_ok ?? 0;
-  document.getElementById('statLatency').innerText =
-    (pool.best_latency_ms != null) ? Math.round(pool.best_latency_ms) + 'ms' : '-';
-  document.getElementById('statProbes').innerText =
-    (stats.probes_ok ?? 0) + ' / ' + (stats.probes_burned ?? 0);
-  
-  // Status Indicator
+  const m = data.metrics || {};
+  const adapt = data.adaptive || {};
+
+  setStat('cWarm', pool.warm ?? 0);
+  setStat('cSubnets', pool.subnets ?? 0);
+  setStat('cRpm', (m.rpm != null) ? Math.round(m.rpm) : 0);
+  setStat('cP95', (m.p95_ms ? Math.round(m.p95_ms) + 'ms' : '—'));
+  setStat('cSuccess', (m.success_rate != null) ? Math.round(m.success_rate * 100) + '%' : '—');
+  setStat('statUptime', formatUptime(data.uptime_sec));
+  setStat('statLatency', (pool.best_latency_ms != null) ? Math.round(pool.best_latency_ms) + 'ms' : '—');
+  setStat('statProbes', (stats.probes_ok ?? 0) + ' / ' + (stats.probes_burned ?? 0));
+
+  const cap = pool.capacity ?? 0;
+  const sub = document.getElementById('cWarmSub');
+  if (sub) sub.textContent = (pool.parked ?? 0) + ' parked · ' + cap + ' slots';
+  const subs = document.getElementById('cSubnetsSub');
+  if (subs) {
+    const w = pool.warm ?? 0, n = pool.subnets ?? 0;
+    subs.textContent = (w > 0 && n > 0 && w / n >= 2)
+      ? 'concentrated — ' + (w / n).toFixed(1) + ' lanes per /24'
+      : 'real pool width';
+  }
+  const rpmSub = document.getElementById('cRpmSub');
+  if (rpmSub) rpmSub.textContent = (m.requests ?? 0) + ' in ' + Math.round((m.window_sec || 300) / 60) + ' min';
+  const reqTotal = document.getElementById('cReqTotal');
+  if (reqTotal) reqTotal.textContent = (stats.requests ?? 0) + ' requests total';
+  const failEl = document.getElementById('cFailovers');
+  if (failEl) failEl.textContent = (stats.failovers ?? 0) + ' failovers';
+  const succSub = document.getElementById('cSuccessSub');
+  if (succSub) succSub.textContent = (m.errors ?? 0) + ' errors / ' + (m.requests ?? 0) + ' req';
+
+  const t = pool.tiers || {};
+  const tiersEl = document.getElementById('cTiers');
+  if (tiersEl) tiersEl.textContent = (t.fast ?? 0) + ' fast · ' + (t.medium ?? 0) + ' med · ' + (t.slow ?? 0) + ' slow';
+
+  const quota = data.quota || {};
   const pill = document.getElementById('statusPill');
   const txt = document.getElementById('statusText');
-  
-  if ((pool.warm ?? 0) > 0) {
-    pill.className = 'status-dot';
-    txt.innerText = 'operational';
+  if (quota.exhausted) {
+    if (pill) pill.className = 'status-dot error';
+    if (txt) txt.textContent = 'quota exhausted · retry in ' + formatDur(quota.resumes_in);
+  } else if ((pool.warm ?? 0) > 0) {
+    if (pill) pill.className = 'status-dot';
+    if (txt) txt.textContent = 'operational · ' + (pool.warm ?? 0) + ' lanes';
   } else {
-    pill.className = 'status-dot loading';
-    txt.innerText = 'discovering routes...';
+    if (pill) pill.className = 'status-dot loading';
+    if (txt) txt.textContent = 'discovering routes…';
   }
 
-  // Engine Live Banner Details
-  document.getElementById('engineQueue').innerText = pool.queue ?? 0;
-  document.getElementById('engineTested').innerText = stats.candidates_tested ?? 0;
-  document.getElementById('engineWarm').innerText = pool.warm ?? 0;
-  document.getElementById('engineFails').innerText = stats.lane_failures ?? 0;
-  document.getElementById('engineStreams').innerText = stats.streams ?? 0;
+  setStat('engineQueue', pool.queue ?? 0);
+  setStat('engineTested', stats.candidates_tested ?? 0);
+  setStat('engineWarm', pool.warm ?? 0);
+  setStat('engineFails', stats.lane_failures ?? 0);
+  setStat('engineStreams', stats.streams ?? 0);
+  setStat('engineConc', (adapt.current ?? '—') + (adapt.enabled ? ' auto' : ' fixed'));
 
-  const engineState = document.getElementById('engineState');
-  if ((pool.queue ?? 0) > 0) {
-    engineState.innerText = `PROBING (${pool.queue} QUEUED)`;
-    engineState.style.color = '#facc15'; // Amber
-  } else if ((pool.warm ?? 0) >= poolTarget) {
-    engineState.innerText = 'IDLE (POOL WARM)';
-    engineState.style.color = '#4ade80'; // Green
-  } else {
-    engineState.innerText = 'SCRAPING FEEDS';
-    engineState.style.color = '#60a5fa'; // Blue
+  const es = document.getElementById('engineState');
+  if (es) {
+    if (quota.exhausted) { es.textContent = 'paused (quota)'; es.style.color = 'var(--bad)'; }
+    else if ((pool.queue ?? 0) > 0) { es.textContent = 'probing (' + pool.queue + ' queued)'; es.style.color = 'var(--warn)'; }
+    else if ((pool.warm ?? 0) >= poolTarget) { es.textContent = 'idle (pool warm)'; es.style.color = 'var(--ok)'; }
+    else { es.textContent = 'scraping feeds'; es.style.color = 'var(--info)'; }
   }
+
+  const foot = document.getElementById('footStatus');
+  if (foot) foot.textContent = 'v' + (data.version || '') + ' · ' + (pool.warm ?? 0) + ' warm / '
+    + (pool.subnets ?? 0) + ' subnets · updated ' + new Date().toLocaleTimeString();
+
+  // Announce meaningful pool changes once, not on every tick.
+  const warmNow = pool.warm ?? 0;
+  if (lastWarmCount >= 0 && warmNow !== lastWarmCount) {
+    announce(warmNow + ' warm lanes, ' + (pool.subnets ?? 0) + ' unique subnets');
+  }
+  lastWarmCount = warmNow;
+
+  pushSpark(warmNow, m.rpm || 0, m.p95_ms || 0);
+  if (data.spark) applyServerSpark(data.spark);
+}
+
+/* ── sparklines ─────────────────────────────────────────────── */
+const SPARK_LEN = 40;
+const sparkData = { warm: [], rpm: [], p95: [] };
+
+function pushSpark(warm, rpm, p95) {
+  sparkData.warm.push(warm); sparkData.rpm.push(rpm); sparkData.p95.push(p95);
+  Object.keys(sparkData).forEach(k => {
+    while (sparkData[k].length > SPARK_LEN) sparkData[k].shift();
+  });
+  drawSpark('sparkWarm', sparkData.warm, '#7ee7a8');
+  drawSpark('sparkRpm', sparkData.rpm, '#86ccff');
+  drawSpark('sparkP95', sparkData.p95, '#ffd166');
+}
+
+function applyServerSpark(spark) {
+  // Server-side buckets are authoritative for request volume/latency history:
+  // they survive a page reload, the client-side ring does not.
+  if (Array.isArray(spark.requests) && spark.requests.length) {
+    drawSpark('sparkRpm', spark.requests, '#86ccff');
+  }
+  if (Array.isArray(spark.p95_ms) && spark.p95_ms.length) {
+    drawSpark('sparkP95', spark.p95_ms, '#ffd166');
+  }
+}
+
+function drawSpark(id, series, color) {
+  const cvs = document.getElementById(id);
+  if (!cvs || !series || series.length < 2) return;
+  const ctx = cvs.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cvs.clientWidth || 240, h = cvs.clientHeight || 26;
+  if (cvs.width !== Math.round(w * dpr) || cvs.height !== Math.round(h * dpr)) {
+    cvs.width = Math.round(w * dpr);
+    cvs.height = Math.round(h * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const max = Math.max.apply(null, series) || 1;
+  const step = w / (series.length - 1);
+  const y = v => h - 2 - (v / max) * (h - 5);
+
+  ctx.beginPath();
+  ctx.moveTo(0, y(series[0]));
+  for (let i = 1; i < series.length; i++) ctx.lineTo(i * step, y(series[i]));
+
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, color + 'cc');
+  grad.addColorStop(1, color + '22');
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = 1.6;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+  const fill = ctx.createLinearGradient(0, 0, 0, h);
+  fill.addColorStop(0, color + '2e');
+  fill.addColorStop(1, color + '00');
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+/* ── lane table (paginated) ─────────────────────────────────── */
+let poolOffset = 0;
+const POOL_LIMIT = 25;
+let poolTotals = { warm: 0, parked: 0 };
+let knownAddrs = new Set();
+
+function pagePool(dir) {
+  const total = poolTotals.warm + poolTotals.parked;
+  const next = poolOffset + dir * POOL_LIMIT;
+  if (next < 0 || next >= Math.max(1, total)) return;
+  poolOffset = next;
+  refreshPool();
 }
 
 async function refreshPool() {
   if (pollsPaused) return;
   try {
-    const r = await apiFetch('/api/pool');
-    if (!r.ok) {
-      console.warn('refreshPool: HTTP', r.status);
-      markStale();
-      return;
-    }
+    const r = await apiFetch('/api/pool?limit=' + POOL_LIMIT + '&offset=' + poolOffset);
+    if (!r.ok) { markStale(); return; }
     const d = await r.json();
     noteSuccess();
-    
-    // Sync telemetry network visualizer graph
-    if (typeof syncNetworkGraph === 'function') {
-      syncNetworkGraph(d.warm || []);
-    }
-    
-    const rows = document.getElementById('laneRows');
-    const ratio = document.getElementById('laneRatio');
-    
+
     const warm = d.warm || [];
     const parked = d.parked || [];
-    // Backend may cap the displayed lists; prefer the totals when present.
-    const totalWarm = (d.total_warm != null) ? d.total_warm : warm.length;
-    const totalParked = (d.total_parked != null) ? d.total_parked : parked.length;
-    ratio.innerText = `${totalWarm} / ${totalWarm + totalParked} total`;
-    
-    if (warm.length === 0 && parked.length === 0) {
-      rows.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;">Discovering egress pathways...</td></tr>`;
+    poolTotals = { warm: d.total_warm ?? warm.length, parked: d.total_parked ?? parked.length };
+
+    if (typeof syncNetworkGraph === 'function') syncNetworkGraph(warm);
+
+    const ratio = document.getElementById('laneRatio');
+    if (ratio) ratio.textContent = poolTotals.warm + ' warm / ' + (poolTotals.warm + poolTotals.parked) + ' total';
+
+    const info = document.getElementById('pageInfo');
+    if (info) {
+      const shown = warm.length + parked.length;
+      info.textContent = shown
+        ? 'showing ' + (poolOffset + 1) + '–' + (poolOffset + shown)
+        : 'no lanes on this page';
+    }
+    const prev = document.getElementById('btnPrev');
+    const next = document.getElementById('btnNext');
+    if (prev) prev.disabled = poolOffset === 0;
+    if (next) next.disabled = poolOffset + POOL_LIMIT >= Math.max(poolTotals.warm, poolTotals.parked);
+
+    const empty = document.getElementById('vizEmpty');
+    if (empty) empty.style.display = warm.length ? 'none' : 'flex';
+
+    const rows = document.getElementById('laneRows');
+    if (!rows) return;
+    if (!warm.length && !parked.length) {
+      rows.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:28px;">Discovering egress pathways…</td></tr>';
       return;
     }
-    
+
+    const nextKnown = new Set();
     let html = '';
-    // Sort warm lanes by score then latency
-    const sorted = [...warm].sort((a,b) => (b.score || 0) - (a.score || 0) || (a.lat_ms || 0) - (b.lat_ms || 0));
-    
-    sorted.forEach(ln => {
-      const latVal = ln.lat_ms ? Math.round(ln.lat_ms) + 'ms' : '-';
-      const scorePct = Math.max(0, Math.min(100, Math.round((ln.score || 0) * 100)));
-      const lastOkAgo = (ln.last_ok_ago != null)
-        ? ' <span style="opacity: 0.6;">· ' + esc(formatDur(ln.last_ok_ago)) + ' ago</span>'
-        : '';
-      
-      html += `
-        <tr>
-          <td class="mono-cell">${esc(ln.addr || '')}</td>
-          <td><span class="badge-proto">${esc(ln.proto || '')}</span></td>
-          <td>
-            <div class="score-bar-bg">
-              <div class="score-bar-fill" style="width: ${scorePct}%;"></div>
-            </div>
-            <span style="font-family: var(--font-mono); font-size: 11px;">${scorePct}%</span>
-          </td>
-          <td class="mono-cell">${esc(latVal)}</td>
-          <td class="mono-cell" style="color: var(--text-muted);">${ln.ok ?? 0} / ${ln.fails ?? 0}${lastOkAgo}</td>
-        </tr>
-      `;
-    });
-    
-    // Append parked/cooldown lanes at the bottom
+    warm.slice().sort((a, b) => (b.score || 0) - (a.score || 0) || (a.lat_ms || 0) - (b.lat_ms || 0))
+      .forEach(ln => {
+        const addr = ln.addr || '';
+        nextKnown.add(addr);
+        const isNew = knownAddrs.size > 0 && !knownAddrs.has(addr);
+        const pct = Math.max(0, Math.min(100, Math.round((ln.score || 0) * 100)));
+        const cap = Math.max(1, ln.capacity || 1);
+        let dots = '';
+        for (let i = 0; i < cap; i++) {
+          dots += '<span class="cap-dot' + (i < (ln.inflight || 0) ? ' on' : '') + '"></span>';
+        }
+        const tierChip = ln.tier
+          ? '<span class="chip ' + (ln.tier === 'fast' ? 'ok' : ln.tier === 'medium' ? 'warn' : 'bad') + '">' + esc(ln.tier) + '</span>'
+          : '';
+        const ago = (ln.last_ok_ago != null && ln.last_ok_ago >= 0)
+          ? ' <span style="opacity:.6">· ' + esc(formatDur(ln.last_ok_ago)) + ' ago</span>' : '';
+        html += '<tr' + (isNew && !REDUCED_MOTION ? ' class="row-new"' : '') + '>'
+          + '<td class="mono-cell">' + esc(addr) + '<br><span style="opacity:.5;font-size:10px">/24 ' + esc(ln.subnet || '') + '</span></td>'
+          + '<td><span class="badge-proto">' + esc(ln.proto || '') + '</span></td>'
+          + '<td><div class="score-bar-bg"><div class="score-bar-fill" style="width:' + pct + '%"></div></div>'
+          + '<span class="mono-cell">' + pct + '%</span></td>'
+          + '<td class="mono-cell">' + esc(ln.lat_ms ? Math.round(ln.lat_ms) + 'ms' : '—') + ' ' + tierChip + '</td>'
+          + '<td><span class="cap-dots" title="' + (ln.inflight || 0) + ' of ' + cap + ' slots in use">' + dots + '</span></td>'
+          + '<td class="mono-cell" style="color:var(--text-muted)">' + (ln.ok ?? 0) + ' / ' + (ln.fails ?? 0) + ago + '</td>'
+          + '</tr>';
+      });
+
     parked.forEach(ln => {
       const untilMs = (ln.until_in || 0) * 1000;
       const deadline = Date.now() + untilMs;
-      const probeAgo = (ln.last_probe_ago != null)
-        ? ' <span style="opacity: 0.6;">· probed ' + esc(formatDur(ln.last_probe_ago)) + ' ago</span>'
-        : '';
-      
-      html += `
-        <tr style="opacity: 0.4;">
-          <td class="mono-cell">${esc(ln.addr || '')}</td>
-          <td><span class="badge-proto">${esc(ln.proto || '')}</span></td>
-          <td>
-            <div class="score-bar-bg"><div class="score-bar-fill" style="width: 0%; background: var(--danger);"></div></div>
-            <span style="font-family: var(--font-mono); font-size: 11px;">cooldown</span>
-          </td>
-          <td class="mono-cell">
-            <span class="parked-countdown" data-deadline="${deadline}">${untilMs > 0 ? formatCountdown(untilMs) : 'now'}</span>${probeAgo}
-          </td>
-          <td class="mono-cell" style="color: var(--text-muted);">—</td>
-        </tr>
-      `;
+      const probeAgo = (ln.last_probe_ago != null && ln.last_probe_ago >= 0)
+        ? ' <span style="opacity:.6">· probed ' + esc(formatDur(ln.last_probe_ago)) + ' ago</span>' : '';
+      html += '<tr class="is-parked">'
+        + '<td class="mono-cell">' + esc(ln.addr || '') + '</td>'
+        + '<td><span class="badge-proto">' + esc(ln.proto || '') + '</span></td>'
+        + '<td><div class="score-bar-bg"><div class="score-bar-fill" style="width:0%;background:var(--bad)"></div></div>'
+        + '<span class="mono-cell">cooldown</span></td>'
+        + '<td class="mono-cell"><span class="parked-countdown" data-deadline="' + deadline + '">'
+        + (untilMs > 0 ? formatCountdown(untilMs) : 'now') + '</span>' + probeAgo + '</td>'
+        + '<td class="mono-cell" style="color:var(--text-muted)">—</td>'
+        + '<td class="mono-cell" style="color:var(--text-muted)">try ' + (ln.probe_tries ?? 0) + '</td>'
+        + '</tr>';
     });
-    
+
     rows.innerHTML = html;
-  } catch(e) {
-    onFetchError(e, 'refreshPool');
-  }
+    knownAddrs = nextKnown;
+  } catch (e) { onFetchError(e, 'refreshPool'); }
 }
 
-// Read and stream real server logs into the trace container
+/* ── logs ───────────────────────────────────────────────────── */
+let logLines = [];
+
+function logClass(line) {
+  if (/burned|error|fail|CRITICAL/i.test(line)) return 'error';
+  if (line.includes('Prober: +Lane')) return 'probe-ok';
+  if (line.includes('Prober:')) return 'probe';
+  if (line.includes('Scraper:')) return 'scraper';
+  if (line.includes('settings')) return 'settings';
+  if (line.includes('churn:') || line.includes('sources:')) return 'churn';
+  return '';
+}
+
+function renderLogs() {
+  const term = document.getElementById('terminalLogs');
+  if (!term) return;
+  const filterEl = document.getElementById('logFilter');
+  const errOnly = document.getElementById('logErrorsOnly');
+  const q = (filterEl ? filterEl.value : '').trim().toLowerCase();
+
+  let lines = logLines;
+  if (q) lines = lines.filter(l => l.toLowerCase().includes(q));
+  if (errOnly && errOnly.checked) lines = lines.filter(l => logClass(l) === 'error');
+
+  if (!lines.length) {
+    term.innerHTML = '<div class="log-entry"><span class="log-time">[system]</span>'
+      + (logLines.length ? 'No lines match the filter.' : 'Listening for telemetry…') + '</div>';
+    return;
+  }
+
+  term.innerHTML = lines.map(line => {
+    const parts = line.split(' | ');
+    let timeStr = parts.length >= 3 ? parts[0] : new Date().toLocaleTimeString();
+    let msg = parts.length >= 3 ? parts.slice(2).join(' | ') : line;
+    return '<div class="log-entry"><span class="log-time">[' + esc(timeStr) + ']</span>'
+      + '<span class="log-msg ' + logClass(line) + '">' + esc(msg) + '</span></div>';
+  }).join('');
+
+  const auto = document.getElementById('logAutoscroll');
+  if (!auto || auto.checked) term.scrollTop = term.scrollHeight;
+}
+
+function clearLogs() {
+  logLines = [];
+  renderLogs();
+  showToast('Log view cleared (server ring untouched)', 'info');
+}
+
+function copyLogs() {
+  copyText(logLines.join('\n'), 'Log copied to clipboard');
+}
+
 async function pollLogs() {
   if (pollsPaused) return;
   try {
-    const rLogs = await apiFetch('/api/logs');
-    if (!rLogs.ok) {
-      console.warn('pollLogs: HTTP', rLogs.status);
-      markStale();
-      return;
-    }
-    const d = await rLogs.json();
+    const r = await apiFetch('/api/logs');
+    if (!r.ok) { markStale(); return; }
+    const d = await r.json();
     noteSuccess();
-    const terminal = document.getElementById('terminalLogs');
-    const autoscroll = document.getElementById('logAutoscroll') ? document.getElementById('logAutoscroll').checked : true;
-    
-    if (d.lines && d.lines.length > 0) {
-      terminal.innerHTML = d.lines.map(line => formatLogLine(line)).join('');
-      if (autoscroll) {
-        terminal.scrollTop = terminal.scrollHeight;
+    logLines = d.lines || [];
+    renderLogs();
+  } catch (e) { onFetchError(e, 'pollLogs'); }
+}
+/* ── SSE: one connection replaces three polling loops ───────── */
+let sse = null;
+let sseRetry = 0;
+let poolDirty = false;
+
+function connectSSE() {
+  if (sse || pollsPaused) return;
+  // EventSource cannot send an Authorization header, so the key rides as a
+  // query parameter. The relay accepts either form for this endpoint.
+  const key = localStorage.getItem('relay_key');
+  const url = '/api/events' + (key ? '?key=' + encodeURIComponent(key) : '');
+  try {
+    sse = new EventSource(url);
+  } catch (e) {
+    setFeed('polling', 'polling (no SSE)');
+    return;
+  }
+
+  sse.onopen = () => {
+    sseRetry = 0;
+    setFeed('live', 'live stream');
+    noteSuccess();
+  };
+
+  sse.onmessage = (ev) => {
+    let evt;
+    try { evt = JSON.parse(ev.data); } catch (_) { return; }
+    handleEvent(evt);
+  };
+
+  sse.onerror = () => {
+    if (sse) { sse.close(); sse = null; }
+    sseRetry++;
+    setFeed('polling', 'polling fallback');
+    // Exponential backoff, capped — a relay restart shouldn't hammer the box.
+    const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(5, sseRetry)));
+    setTimeout(connectSSE, delay);
+  };
+}
+
+function handleEvent(evt) {
+  noteSuccess();
+  switch (evt.kind) {
+    case 'hello':
+      if (evt.pool) updateTelemetry({ pool: evt.pool, stats: {}, version: evt.version });
+      break;
+    case 'lane_up':
+      poolDirty = true;
+      bumpNode(evt.addr, 'up');
+      announce('lane up: ' + (evt.addr || ''));
+      break;
+    case 'lane_down':
+      poolDirty = true;
+      bumpNode(evt.addr, 'down');
+      break;
+    case 'request':
+      // Fire a particle for the exact lane that served the request. This is
+      // what makes the visualiser real telemetry instead of decoration.
+      bumpNode(evt.lane, evt.status === 200 ? 'hit' : 'err');
+      break;
+    case 'churn':
+      poolDirty = true;
+      break;
+    case 'adapt':
+      setStat('engineConc', (evt.current ?? '—') + ' auto');
+      break;
+    case 'log':
+      if (evt.line) {
+        logLines.push(evt.line);
+        while (logLines.length > 600) logLines.shift();
+        renderLogs();
       }
-    } else if (!terminal.innerHTML.trim()) {
-      terminal.innerHTML = '<div class="log-entry"><span class="log-time">[System]</span>Listening for live engine telemetry...</div>';
-    }
-  } catch(e) {
-    onFetchError(e, 'pollLogs');
+      break;
   }
 }
 
-// ── Live Network Graph Visualizer ──────────────────
+/* ── network topology visualiser (event-driven) ─────────────── */
 const netCanvas = document.getElementById('networkCanvas');
 const netCtx = netCanvas ? netCanvas.getContext('2d') : null;
-let netW = 0, netH = 0;
 let netNodes = [];
 let netParticles = [];
 let globalTime = 0;
+let vizRunning = false;
 
 function resizeNetCanvas() {
-  if (!netCanvas) return;
+  if (!netCanvas || !netCtx) return;
   const rect = netCanvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  netW = netCanvas.width = rect.width * dpr;
-  netH = netCanvas.height = rect.height * dpr;
-  netCtx.scale(dpr, dpr);
+  netCanvas.width = Math.max(1, Math.round(rect.width * dpr));
+  netCanvas.height = Math.max(1, Math.round(rect.height * dpr));
+  // setTransform (not scale) so repeated resizes don't compound the scale
+  netCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function vizDims() {
+  const dpr = window.devicePixelRatio || 1;
+  return { w: netCanvas.width / dpr, h: netCanvas.height / dpr };
+}
+
+function tierColor(lat) {
+  if (lat && lat < 1500) return '#7ee7a8';
+  if (lat && lat < 4000) return '#ffd166';
+  return '#ff8a90';
 }
 
 function syncNetworkGraph(warmLanes) {
   if (!netCanvas) return;
-  const cx = netCanvas.width / (2 * (window.devicePixelRatio || 1));
-  const cy = netCanvas.height / (2 * (window.devicePixelRatio || 1));
-
+  const { w, h } = vizDims();
+  const cx = w / 2, cy = h / 2;
   const existing = new Map(netNodes.map(n => [n.addr, n]));
   const updated = [];
 
   warmLanes.forEach((ln, i) => {
-    // Distribute nodes in a pseudo-3D layered double ellipse structure
-    const layer = i % 2;
     const count = Math.max(warmLanes.length, 1);
-    const angle = (i / count) * Math.PI * 2;
-    
     let node = existing.get(ln.addr);
-    const color = (ln.lat_ms && ln.lat_ms < 1500) ? '#4ade80' : (ln.lat_ms && ln.lat_ms < 4000) ? '#facc15' : '#f87171';
-    
+    const color = tierColor(ln.lat_ms);
     if (!node) {
       node = {
         addr: ln.addr,
-        angle: angle,
-        layer: layer,
-        speed: 0.0001 + Math.random() * 0.0001,
-        // Start random then float to target
+        angle: (i / count) * Math.PI * 2,
+        layer: i % 2,
+        speed: 0.00035 + Math.random() * 0.0004,
         x: cx + (Math.random() - 0.5) * 150,
         y: cy + (Math.random() - 0.5) * 80,
-        color: color,
-        pulse: 0
+        color: color, pulse: 0, z: 0
       };
     } else {
       node.color = color;
     }
+    node.subnet = ln.subnet;
+    node.load = (ln.inflight || 0) / Math.max(1, ln.capacity || 1);
     updated.push(node);
   });
 
   netNodes = updated;
+}
 
-  // Emit a traffic particle from center core to a random node
-  if (netNodes.length > 0 && Math.random() < 0.45) {
-    const target = netNodes[Math.floor(Math.random() * netNodes.length)];
-    netParticles.push({
-      x: cx,
-      y: cy,
-      target: target,
-      progress: 0,
-      speed: 0.015 + Math.random() * 0.02,
-      // Random control point for bezier curve path
-      cpX: cx + (Math.random() - 0.5) * 80,
-      cpY: cy + (Math.random() - 0.5) * 80
-    });
-  }
+/* Emit a particle toward a specific lane — driven by real request events. */
+function bumpNode(addr, kind) {
+  if (!netCanvas || !netNodes.length) return;
+  const { w, h } = vizDims();
+  let node = netNodes.find(n => n.addr === addr);
+  if (!node) node = netNodes[Math.floor(Math.random() * netNodes.length)];
+  if (!node) return;
+  if (kind === 'down') { node.color = '#ff8a90'; node.pulse = 1; return; }
+  if (REDUCED_MOTION) { node.pulse = 0.6; return; }
+  netParticles.push({
+    target: node, progress: 0,
+    speed: 0.02 + Math.random() * 0.02,
+    err: kind === 'err',
+    cpX: w / 2 + (Math.random() - 0.5) * 90,
+    cpY: h / 2 + (Math.random() - 0.5) * 90
+  });
+  if (netParticles.length > 120) netParticles.shift();
 }
 
 function animNetworkGraph() {
-  if (!netCtx || !netW) {
-    requestAnimationFrame(animNetworkGraph);
-    return;
-  }
-  const dpr = window.devicePixelRatio || 1;
-  const cw = netCanvas.width / dpr;
-  const ch = netCanvas.height / dpr;
-  
+  if (!netCtx || !netCanvas.width) { requestAnimationFrame(animNetworkGraph); return; }
+  const { w: cw, h: ch } = vizDims();
   netCtx.clearRect(0, 0, cw, ch);
   globalTime += 0.005;
 
-  const cx = cw / 2;
-  const cy = ch / 2;
+  const cx = cw / 2, cy = ch / 2;
+  const rx = cw * 0.38, ry = ch * 0.26;
 
-  // Orbit parameters
-  const rx = cw * 0.38;
-  const ry = ch * 0.28;
-
-  // Update node orbit targets in pseudo-3D (front/back depth using Z-axis)
   netNodes.forEach(n => {
-    n.angle += n.speed;
-    
-    // Pseudo-3D Z depth projection
-    const z = Math.cos(n.angle + (n.layer * Math.PI * 0.5));
-    const xOffset = Math.sin(n.angle + (n.layer * Math.PI * 0.5)) * rx;
-    // Tilt the orbits slightly
-    const yOffset = z * ry + (n.layer === 0 ? -12 : 12);
-
-    n.tx = cx + xOffset;
-    n.ty = cy + yOffset;
-    n.z = z; // depth factor (-1 to 1)
-
-    // Smooth lerping to position
+    if (!REDUCED_MOTION) n.angle += n.speed;
+    const z = Math.cos(n.angle + n.layer * Math.PI * 0.5);
+    n.tx = cx + Math.sin(n.angle + n.layer * Math.PI * 0.5) * rx;
+    n.ty = cy + z * ry + (n.layer === 0 ? -12 : 12);
+    n.z = z;
     n.x += (n.tx - n.x) * 0.08;
     n.y += (n.ty - n.y) * 0.08;
   });
 
-  // Enable composite screen rendering for lights blend/glow
   netCtx.save();
   netCtx.globalCompositeOperation = 'screen';
-
-  // 1. Draw glowing connection beams (back nodes first for depth layering)
   netNodes.sort((a, b) => a.z - b.z);
 
+  // beams
   netNodes.forEach(n => {
-    const alpha = (n.z + 1.2) / 2.2; // fade back connections more
+    const alpha = (n.z + 1.2) / 2.2;
     netCtx.beginPath();
-    // Curved bezier link from core to node
     netCtx.moveTo(cx, cy);
-    const cpX = cx + (n.x - cx) * 0.4;
-    const cpY = cy + (n.y - cy) * 0.7;
-    netCtx.quadraticCurveTo(cpX, cpY, n.x, n.y);
-    
+    netCtx.quadraticCurveTo(cx + (n.x - cx) * 0.4, cy + (n.y - cy) * 0.7, n.x, n.y);
     const grad = netCtx.createLinearGradient(cx, cy, n.x, n.y);
-    grad.addColorStop(0, 'rgba(251, 251, 251, 0.04)');
-    grad.addColorStop(1, n.color === '#4ade80' ? `rgba(74, 222, 128, ${0.12 * alpha})` : n.color === '#facc15' ? `rgba(250, 204, 21, ${0.12 * alpha})` : `rgba(248, 113, 113, ${0.12 * alpha})`);
-    
+    grad.addColorStop(0, 'rgba(251,251,251,0.05)');
+    grad.addColorStop(1, hexA(n.color, 0.13 * alpha));
     netCtx.strokeStyle = grad;
-    netCtx.lineWidth = 1 + (n.z + 1) * 0.5; // thinner back lines
+    netCtx.lineWidth = 1 + (n.z + 1) * 0.5;
     netCtx.stroke();
   });
 
-  // 2. Render proxy nodes with bloom and depth sizing
+  // nodes
   netNodes.forEach(n => {
-    const scale = (n.z + 1.8) / 2.8; // Z scale factor (0.3 to 1.3)
-    const radius = 3.5 * scale;
+    const scale = (n.z + 1.8) / 2.8;
+    const radius = 3.5 * scale * (1 + (n.load || 0) * 0.5);
     const alpha = (n.z + 1.2) / 2.2;
 
-    // Outer aura glow
     netCtx.shadowBlur = 10 * scale;
     netCtx.shadowColor = n.color;
     netCtx.fillStyle = n.color;
     netCtx.globalAlpha = 0.85 * alpha;
-    
     netCtx.beginPath();
     netCtx.arc(n.x, n.y, radius, 0, Math.PI * 2);
     netCtx.fill();
     netCtx.shadowBlur = 0;
-    netCtx.globalAlpha = 1.0;
+    netCtx.globalAlpha = 1;
 
-    // Inner bright core
     netCtx.fillStyle = '#ffffff';
     netCtx.beginPath();
     netCtx.arc(n.x, n.y, radius * 0.45, 0, Math.PI * 2);
     netCtx.fill();
 
-    // Concentric shockwave waves (triggered on hit)
     if (n.pulse > 0) {
       netCtx.strokeStyle = n.color;
       netCtx.globalAlpha = n.pulse;
@@ -2136,84 +2392,194 @@ function animNetworkGraph() {
       netCtx.beginPath();
       netCtx.arc(n.x, n.y, radius + (1 - n.pulse) * 20, 0, Math.PI * 2);
       netCtx.stroke();
-      
-      // Secondary echo wave
       if (n.pulse > 0.4) {
         netCtx.beginPath();
         netCtx.arc(n.x, n.y, radius + (1 - n.pulse) * 32, 0, Math.PI * 2);
         netCtx.stroke();
       }
       n.pulse -= 0.025;
-      netCtx.globalAlpha = 1.0;
+      netCtx.globalAlpha = 1;
     }
   });
 
-  // 3. Render traffic particles moving along curved paths
+  // particles
   for (let i = netParticles.length - 1; i >= 0; i--) {
     const p = netParticles[i];
     p.progress += p.speed;
-
-    // Quadratic Bezier interpolation for curved particle flight path
     const t = p.progress;
     const px = (1 - t) * (1 - t) * cx + 2 * (1 - t) * t * p.cpX + t * t * p.target.x;
     const py = (1 - t) * (1 - t) * cy + 2 * (1 - t) * t * p.cpY + t * t * p.target.y;
-
     const scale = (p.target.z + 1.8) / 2.8;
-
+    const col = p.err ? '#ff8a90' : p.target.color;
     netCtx.shadowBlur = 8 * scale;
-    netCtx.shadowColor = p.target.color;
-    netCtx.fillStyle = p.target.color;
+    netCtx.shadowColor = col;
+    netCtx.fillStyle = col;
     netCtx.beginPath();
-    netCtx.arc(px, py, 2 * scale, 0, Math.PI * 2);
+    netCtx.arc(px, py, 2.2 * scale, 0, Math.PI * 2);
     netCtx.fill();
     netCtx.shadowBlur = 0;
-
-    if (p.progress >= 1) {
-      p.target.pulse = 1.0; // Trigger ripples on hit
-      netParticles.splice(i, 1);
-    }
+    if (p.progress >= 1) { p.target.pulse = 1; netParticles.splice(i, 1); }
   }
 
-  // 4. Draw central core node with breathing halo
-  const coreGlow = 10 + Math.sin(globalTime * 4) * 4;
+  // core
+  const coreGlow = REDUCED_MOTION ? 10 : 10 + Math.sin(globalTime * 4) * 4;
   netCtx.shadowBlur = coreGlow;
-  netCtx.shadowColor = 'rgba(251, 251, 251, 0.9)';
+  netCtx.shadowColor = 'rgba(251,251,251,0.9)';
   netCtx.fillStyle = '#ffffff';
   netCtx.beginPath();
   netCtx.arc(cx, cy, 9, 0, Math.PI * 2);
   netCtx.fill();
   netCtx.shadowBlur = 0;
-
-  // Core title text
   netCtx.fillStyle = '#a1a1aa';
   netCtx.font = '8px monospace';
   netCtx.textAlign = 'center';
-  netCtx.fillText('RELAY CORE', cx, cy + 20);
-
+  netCtx.fillText('RELAY CORE', cx, cy + 21);
   netCtx.restore();
+
   requestAnimationFrame(animNetworkGraph);
 }
 
-// Initialize page
+function hexA(hex, a) {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+}
+
+/* ── WebGL liquid-metal backdrop ────────────────────────────── */
+function initShader() {
+  const canvas = document.getElementById('canvas-bg');
+  if (!canvas || REDUCED_MOTION) return;      // no ambient motion when asked
+  let gl = null;
+  try { gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl'); } catch (e) { gl = null; }
+  if (!gl) return;                            // graceful: CSS background stands alone
+
+  const vs = 'attribute vec2 position; void main(){ gl_Position = vec4(position,0.0,1.0); }';
+  const fs = [
+    'precision highp float;',
+    'uniform vec2 u_resolution;',
+    'uniform float u_time;',
+    'void main(){',
+    '  vec2 p = (gl_FragCoord.xy - 0.5*u_resolution.xy)/u_resolution.y;',
+    '  float t = u_time*0.22;',
+    '  for(float i=1.0;i<4.0;i++){',
+    '    p.x += sin(p.y + t + i*0.5)*0.18/i;',
+    '    p.y += cos(p.x - t + i*0.3)*0.15/i;',
+    '  }',
+    '  float d = sin(p.x*2.5+t)*cos(p.y*2.5-t);',
+    '  vec3 normal = normalize(vec3(d*0.5, d*0.3, 1.0));',
+    '  vec3 lightDir = normalize(vec3(0.5,0.8,1.2));',
+    '  float spec = pow(max(dot(normal,lightDir),0.0),32.0);',
+    '  float diffuse = max(dot(normal,lightDir),0.0)*0.2;',
+    '  vec3 cBlue = vec3(0.66,0.91,1.0);',
+    '  vec3 cCream = vec3(0.86,0.82,0.74);',
+    '  float mixv = clamp(normal.x*0.5+0.5,0.0,1.0);',
+    '  vec3 irid = mix(cBlue,cCream,mixv)*(spec+0.12);',
+    '  vec3 bg = vec3(0.027,0.027,0.027);',
+    '  gl_FragColor = vec4(bg + irid + diffuse*0.05, 1.0);',
+    '}'
+  ].join('\n');
+
+  function mk(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      // Compile failures used to fail silently and leave a black canvas.
+      console.warn('shader compile failed:', gl.getShaderInfoLog(sh));
+      return null;
+    }
+    return sh;
+  }
+
+  const vsh = mk(gl.VERTEX_SHADER, vs);
+  const fsh = mk(gl.FRAGMENT_SHADER, fs);
+  if (!vsh || !fsh) return;
+
+  const program = gl.createProgram();
+  gl.attachShader(program, vsh);
+  gl.attachShader(program, fsh);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.warn('shader link failed:', gl.getProgramInfoLog(program));
+    return;
+  }
+  gl.useProgram(program);
+
+  const posLoc = gl.getAttribLocation(program, 'position');
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+  const resLoc = gl.getUniformLocation(program, 'u_resolution');
+  const timeLoc = gl.getUniformLocation(program, 'u_time');
+
+  function resize() {
+    // Cap the DPR: a 4K retina viewport at dpr 3 renders 12M fragments/frame
+    // for a background gradient, which pegs the GPU on laptops.
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    canvas.width = Math.round(window.innerWidth * dpr);
+    canvas.height = Math.round(window.innerHeight * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  let visible = true;
+  document.addEventListener('visibilitychange', () => {
+    visible = !document.hidden;
+    if (visible) requestAnimationFrame(render);
+  });
+
+  function render(time) {
+    if (!visible) return;                   // don't burn GPU in a hidden tab
+    gl.uniform2f(resLoc, canvas.width, canvas.height);
+    gl.uniform1f(timeLoc, time * 0.001);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
+}
+
+/* ── boot ───────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {
-  // Any form edit bumps the sequence counter so in-flight stats responses
-  // can never clobber what the user just typed.
   const form = document.getElementById('settingsForm');
   if (form) form.addEventListener('input', () => { settingsSeq++; });
+
   const authInput = document.getElementById('authKeyInput');
-  if (authInput) authInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') saveAuthKey();
+  if (authInput) authInput.addEventListener('keydown', e => { if (e.key === 'Enter') saveAuthKey(); });
+
+  document.querySelectorAll('.modal-backdrop').forEach(m => {
+    m.addEventListener('click', e => {
+      if (e.target === m) { if (m.id === 'authModal') closeAuthModal(); else closeModal(m.id); }
+    });
   });
-  
-  loadSettings();
+
+  wireTablist();
+  initShader();
   renderGuide();
   resizeNetCanvas();
   animNetworkGraph();
   window.addEventListener('resize', resizeNetCanvas);
-  
-  setInterval(tickDashboard, 1000);                        // parked countdowns + stale ticker
-  setInterval(() => { loadSettings(); refreshPool(); }, 3000); // consolidated stats/pool cadence
-  setInterval(pollLogs, 2500);                             // logs only
+
+  loadSettings();
+  refreshPool();
+  pollLogs();
+  loadDiagnostics();
+  connectSSE();
+
+  setInterval(tickDashboard, 1000);
+  // SSE carries the live deltas; these slower polls reconcile absolute values
+  // and keep the dashboard correct even when the stream is unavailable.
+  setInterval(() => { loadSettings(); }, 5000);
+  setInterval(() => {
+    if (poolDirty || !sse) { poolDirty = false; refreshPool(); }
+  }, 4000);
+  setInterval(() => { if (!sse) pollLogs(); }, 4000);
+  setInterval(loadDiagnostics, 20000);
 });
 </script>
 </body>
