@@ -16,14 +16,12 @@
   --bg: #070707;
   --surface: rgba(18, 18, 18, 0.6);
   --surface-border: rgba(255, 255, 255, 0.04);
-  --surface-hover: rgba(255, 255, 255, 0.02);
   
   --text: #fbfbfb;
   --text-muted: #8b8b8b;
   
   /* Metallic / Iridescent presets */
   --chrome-silver: linear-gradient(135deg, #aae8ff 0%, #dcd2bc 50%, #fff8e1 100%);
-  --chrome-glow: 0 8px 32px 0 rgba(170, 232, 255, 0.06);
   --pill-bg: rgba(255, 255, 255, 0.03);
   --pill-border: rgba(255, 255, 255, 0.05);
   
@@ -395,19 +393,6 @@ header {
 }
 
 /* Custom inputs and toggles */
-.form-row-2 {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-@media (min-width: 500px) {
-  .form-row-2 {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
 .input-container {
   display: flex;
   flex-direction: column;
@@ -531,6 +516,60 @@ input:checked + .switch-slider:before {
   opacity: 0.9;
 }
 
+.action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.input-element.input-invalid {
+  border-color: var(--danger);
+}
+
+.field-error {
+  display: block;
+  color: var(--danger);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  min-height: 12px;
+}
+
+/* Collapsible Advanced settings */
+.advanced-box {
+  margin-bottom: 24px;
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.01);
+}
+
+.advanced-box summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  user-select: none;
+}
+
+.advanced-box[open] summary {
+  color: var(--text);
+  margin-bottom: 14px;
+}
+
+.advanced-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+@media (min-width: 500px) {
+  .advanced-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 /* Dynamic Lane telemetry table */
 .lanes-table-header {
   display: flex;
@@ -641,6 +680,22 @@ tr:hover td {
   }
 }
 
+.toast.success {
+  border-color: rgba(197, 254, 158, 0.3);
+}
+.toast.success svg {
+  stroke: var(--success);
+}
+.toast.danger {
+  border-color: rgba(247, 136, 141, 0.35);
+}
+.toast.danger svg {
+  stroke: var(--danger);
+}
+.toast.info svg {
+  stroke: var(--text-muted);
+}
+
 /* Terminal log component */
 .terminal-wrapper {
   background: rgba(0, 0, 0, 0.5);
@@ -719,7 +774,7 @@ tr:hover td {
     <div class="logo-group">
       <div class="logo-title">
         <span>ip-relay</span>
-        <span class="badge-proto" style="margin-left: 2px; font-size: 9px; vertical-align: middle;">v0.6.0</span>
+        <span class="badge-proto" style="margin-left: 2px; font-size: 9px; vertical-align: middle;">v__VERSION__</span>
       </div>
       <div class="logo-sub">resilient egress rotator</div>
     </div>
@@ -762,6 +817,26 @@ tr:hover td {
     </div>
   </div>
 
+  <!-- Extended Metrics / Stats Row -->
+  <div class="stats-row">
+    <div class="stat-pill">
+      <span class="stat-val" id="statUptime">00:00</span>
+      <span class="stat-label">Uptime</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val" id="statSources">0</span>
+      <span class="stat-label">Sources OK</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val" id="statLatency">-</span>
+      <span class="stat-label">Best Latency</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val" id="statProbes">0 / 0</span>
+      <span class="stat-label">Probes OK / Burned</span>
+    </div>
+  </div>
+
   <!-- Live Egress Network Topology Visualizer Card -->
   <div class="card-30" style="margin-bottom: 24px; position: relative; overflow: hidden; padding: 20px;">
     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
@@ -776,15 +851,18 @@ tr:hover td {
     </div>
     
     <!-- Live Status Banner -->
-    <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 10px 16px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-family: var(--font-mono); color: #e4e4e7; backdrop-filter: blur(10px);">
+    <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 10px 16px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-family: var(--font-mono); color: #e4e4e7; backdrop-filter: blur(10px); flex-wrap: wrap; gap: 10px;">
       <div style="display: flex; align-items: center; gap: 8px;">
         <span style="color: var(--text-muted);">ENGINE STATE:</span>
         <span id="engineState" style="color: #60a5fa; font-weight: bold; text-transform: uppercase;">IDLE</span>
       </div>
-      <div style="display: flex; gap: 16px; align-items: center;">
+      <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
         <div>QUEUE: <span id="engineQueue" style="color: #facc15;">0</span></div>
         <div>TESTED: <span id="engineTested" style="color: #a78bfa;">0</span></div>
         <div>WARM: <span id="engineWarm" style="color: #4ade80;">0</span></div>
+        <div>LANE FAILS: <span id="engineFails" style="color: #f87171;">0</span></div>
+        <div>STREAMS: <span id="engineStreams" style="color: #38bdf8;">0</span></div>
+        <button type="button" id="btnRefresh" onclick="refreshProxies()" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: #e4e4e7; border-radius: 99px; padding: 4px 12px; font-size: 10px; font-family: var(--font-mono); cursor: pointer; transition: all 0.2s;">Refresh proxies now</button>
       </div>
     </div>
     
@@ -862,7 +940,7 @@ tr:hover td {
           Rotator settings
         </div>
         
-        <form id="settingsForm" onsubmit="saveSettings(event)">
+        <form id="settingsForm" onsubmit="saveSettings(event)" novalidate>
           <!-- Drag Slider: Target Pool Size -->
           <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 10px;">Upstream provider</div>
           
@@ -923,6 +1001,64 @@ tr:hover td {
             </label>
           </div>
           
+          <details class="advanced-box">
+            <summary>Advanced settings</summary>
+            <div style="display: flex; flex-direction: column; gap: 16px;">
+              <div class="input-container">
+                <label class="input-label" for="cfgRelayKey">Relay API Key</label>
+                <div style="display: flex; gap: 8px;">
+                  <input type="password" class="input-element" id="cfgRelayKey" placeholder="optional — protects relay &amp; dashboard endpoints" style="flex: 1; font-family: var(--font-mono); font-size: 11px;" autocomplete="new-password">
+                  <button type="button" id="btnToggleRelayKey" onclick="toggleRelayKeyVisibility()" style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 10px 14px; font-size: 11px; color: #e4e4e7; cursor: pointer;">Show</button>
+                </div>
+                <span style="font-size: 9px; color: var(--text-muted); margin-top: 4px; display: block;">Saving a new key here applies it to the relay and stores it as this browser's dashboard key.</span>
+              </div>
+              
+              <div class="toggle-container">
+                <div class="toggle-text-group">
+                  <span class="toggle-label">Allow SOCKS Sources</span>
+                  <span class="toggle-desc">Include SOCKS4/5 proxies in the candidate pool</span>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="cfgAllowSocks">
+                  <span class="switch-slider"></span>
+                </label>
+              </div>
+              
+              <div class="advanced-grid">
+                <div class="input-container">
+                  <label class="input-label" for="cfgMaxCandidates">Max Candidates</label>
+                  <input type="number" class="input-element" id="cfgMaxCandidates" min="100" max="10000" step="100" value="3000" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
+                  <span class="field-error" id="errCfgMaxCandidates"></span>
+                </div>
+                <div class="input-container">
+                  <label class="input-label" for="cfgProbeTimeout">Probe Timeout (s)</label>
+                  <input type="number" class="input-element" id="cfgProbeTimeout" min="5" max="60" step="1" value="25" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
+                  <span class="field-error" id="errCfgProbeTimeout"></span>
+                </div>
+                <div class="input-container">
+                  <label class="input-label" for="cfgRelayTimeout">Relay Proxy Timeout (s)</label>
+                  <input type="number" class="input-element" id="cfgRelayTimeout" min="10" max="120" step="1" value="40" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
+                  <span class="field-error" id="errCfgRelayTimeout"></span>
+                </div>
+                <div class="input-container">
+                  <label class="input-label" for="cfgRelayAttempts">Relay Attempts</label>
+                  <input type="number" class="input-element" id="cfgRelayAttempts" min="1" max="12" step="1" value="6" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
+                  <span class="field-error" id="errCfgRelayAttempts"></span>
+                </div>
+                <div class="input-container">
+                  <label class="input-label" for="cfgCooldownSec">Lane Cooldown (s)</label>
+                  <input type="number" class="input-element" id="cfgCooldownSec" min="10" max="3600" step="1" value="90" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
+                  <span class="field-error" id="errCfgCooldownSec"></span>
+                </div>
+                <div class="input-container">
+                  <label class="input-label" for="cfgRecoverSec">Lane Recover (s)</label>
+                  <input type="number" class="input-element" id="cfgRecoverSec" min="30" max="7200" step="1" value="240" oninput="updateApplyDisabled()" style="font-family: var(--font-mono); font-size: 11px;">
+                  <span class="field-error" id="errCfgRecoverSec"></span>
+                </div>
+              </div>
+            </div>
+          </details>
+          
           <div style="display: flex; gap: 12px; margin-top: 24px;">
             <button type="submit" class="action-btn" id="btnApply" style="flex: 1;">Apply & Save</button>
             <button type="button" class="action-btn" id="btnValidate" onclick="triggerKeyValidation()" style="flex: 1; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.08); color: #e4e4e7;">Validate Keys</button>
@@ -962,6 +1098,15 @@ tr:hover td {
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<div id="authModal" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); z-index: 200; align-items: center; justify-content: center;">
+  <div style="background: #121212; border: 1px solid rgba(255,255,255,0.12); border-radius: 16px; padding: 24px; max-width: 380px; width: 90%; box-shadow: 0 20px 60px rgba(0,0,0,0.6);">
+    <div style="font-size: 14px; font-weight: 600; margin-bottom: 6px;">Relay key required</div>
+    <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 14px; line-height: 1.6;">The relay rejected the dashboard request (401). Enter the relay API key to reconnect — polls resume automatically.</div>
+    <input type="password" id="authKeyInput" class="input-element" placeholder="Relay API key" style="width: 100%; margin-bottom: 14px; font-family: var(--font-mono); font-size: 12px;" autocomplete="new-password">
+    <button type="button" onclick="saveAuthKey()" class="action-btn" style="padding: 10px;">Save &amp; Retry</button>
   </div>
 </div>
 
@@ -1066,37 +1211,45 @@ function initShader() {
 }
 initShader();
 
-// Guide blocks mapping (dynamic dynamic host calculation)
+// Guide blocks mapping (dynamic host calculation + live settings)
 let currentGuideTab = 'curl';
 const originHost = window.location.origin;
+let liveModel = 'deepseek-v4-flash-free';
+let guideKey = 'public';
+
+function guideAuthValue() {
+  // When a relay key is stored, hint the user to use it; otherwise show the
+  // upstream key (server returns it masked, i.e. contains '...').
+  return localStorage.getItem('relay_key') ? '<your key>' : guideKey;
+}
 
 const guideSnippets = {
   curl: () => `curl ${originHost}/v1/chat/completions \\
-  -H "Authorization: Bearer public" \\
+  -H "Authorization: Bearer ${guideAuthValue()}" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "deepseek-v4-flash-free",
+    "model": "${liveModel}",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'`,
   claude: () => `# Export these variables in your shell before starting Claude Code:
 export ANTHROPIC_BASE_URL="${originHost}/v1"
-export ANTHROPIC_AUTH_TOKEN="public"
-export ANTHROPIC_CUSTOM_MODEL_OPTION="deepseek-v4-flash-free"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-flash-free"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="deepseek-v4-flash-free"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4-flash-free"
-export CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4-flash-free"
+export ANTHROPIC_AUTH_TOKEN="${guideAuthValue()}"
+export ANTHROPIC_CUSTOM_MODEL_OPTION="${liveModel}"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${liveModel}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="${liveModel}"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="${liveModel}"
+export CLAUDE_CODE_SUBAGENT_MODEL="${liveModel}"
 
 # Then run: claude`,
   python: () => `import openai
 
 client = openai.OpenAI(
     base_url="${originHost}/v1",
-    api_key="public"
+    api_key="${guideAuthValue()}"
 )
 
 response = client.chat.completions.create(
-    model="deepseek-v4-flash-free",
+    model="${liveModel}",
     messages=[{"role": "user", "content": "Hello!"}]
 )
 print(response.choices[0].message.content)`,
@@ -1105,15 +1258,15 @@ print(response.choices[0].message.content)`,
   "name": "openai-compatible-chat-oc-rotator",
   "prefix": "ocr",
   "baseUrl": "${originHost}/v1",
-  "apiKey": "public",
-  "models": ["deepseek-v4-flash-free"]
+  "apiKey": "${guideAuthValue()}",
+  "models": ["${liveModel}"]
 }`
 };
 
 function switchGuide(tab) {
   currentGuideTab = tab;
   document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.innerText.toLowerCase().includes(tab === 'claude' ? 'claude' : tab));
+    btn.classList.toggle('active', btn.innerText.toLowerCase().includes(tab));
   });
   renderGuide();
 }
@@ -1123,25 +1276,82 @@ function renderGuide() {
   if (el) el.innerText = guideSnippets[currentGuideTab]();
 }
 
+// XSS-safe escaping for any string interpolated into innerHTML
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Clipboard with fallback for non-secure contexts
+function fallbackCopy(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+function copyText(text, successMsg) {
+  if (!text) return;
+  const done = () => showToast(successMsg, 'success');
+  const fail = () => showToast('Copy failed — clipboard unavailable', 'danger');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => {
+      if (fallbackCopy(text)) done(); else fail();
+    });
+  } else if (fallbackCopy(text)) {
+    done();
+  } else {
+    fail();
+  }
+}
+
 function copyCode() {
   const el = document.getElementById('codeBlock');
-  navigator.clipboard.writeText(el.innerText);
-  showToast("Code snippet copied to clipboard");
+  if (el) copyText(el.innerText, 'Code snippet copied to clipboard');
 }
 
 function copyBaseUrl() {
   const hostVal = document.getElementById('baseUrlVal').innerText;
-  navigator.clipboard.writeText(hostVal);
-  showToast("Base URL copied to clipboard");
+  copyText(hostVal, 'Base URL copied to clipboard');
 }
 
-function showToast(msg) {
+let lastToastMsg = '';
+let lastToastAt = 0;
+function showToast(msg, variant) {
   const container = document.getElementById('toastContainer');
+  if (!container) return;
+  variant = variant || 'info';
+  const now = Date.now();
+  if (msg === lastToastMsg && now - lastToastAt < 3000) return; // dedupe identical toasts
+  lastToastMsg = msg;
+  lastToastAt = now;
+  
+  // Cap the stack so it never grows unbounded
+  while (container.children.length >= 3) {
+    container.firstChild.remove();
+  }
+  
   const toast = document.createElement('div');
-  toast.className = 'toast';
+  toast.className = 'toast ' + variant;
+  const icon = variant === 'danger' ? '<path d="M18 6L6 18"/><path d="M6 6l12 12"/>' :
+               variant === 'success' ? '<path d="M20 6L9 17l-5-5"/>' :
+               '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>';
   toast.innerHTML = `
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
-    <span>${msg}</span>
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5">${icon}</svg>
+    <span>${esc(msg)}</span>
   `;
   container.appendChild(toast);
   setTimeout(() => {
@@ -1156,60 +1366,295 @@ function updateSlider(name) {
   const input = document.getElementById('cfg' + name);
   const fill = document.getElementById('fill' + name);
   const val = document.getElementById('val' + name);
+  if (!input || !fill || !val) return;
   
   const min = parseFloat(input.min);
   const max = parseFloat(input.max);
-  const pct = ((input.value - min) / (max - min)) * 100;
-  
+  const v = parseFloat(input.value);
+  if (!isFinite(min) || !isFinite(max) || max <= min || !isFinite(v)) {
+    fill.style.width = '0%';
+    val.innerText = input.value || '';
+    return;
+  }
+  const pct = Math.min(100, Math.max(0, ((v - min) / (max - min)) * 100));
   fill.style.width = pct + '%';
   val.innerText = input.value;
 }
 
+// ── API helper with relay-key auth ─────────────────────────────
+let pollsPaused = false;
+let authModalOpen = false;
+
+async function apiFetch(path, opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  const key = localStorage.getItem('relay_key');
+  if (key) headers['Authorization'] = 'Bearer ' + key;
+  let r;
+  try {
+    r = await fetch(path, Object.assign({}, opts, { headers }));
+  } catch (e) {
+    throw e; // network failure — caller marks stale
+  }
+  if (r.status === 401) {
+    handleUnauthorized();
+    const err = new Error('unauthorized');
+    err.auth = true;
+    throw err;
+  }
+  return r;
+}
+
+function handleUnauthorized() {
+  pollsPaused = true;
+  if (!authModalOpen) {
+    authModalOpen = true;
+    const modal = document.getElementById('authModal');
+    if (modal) modal.style.display = 'flex';
+  }
+}
+
+function closeAuthModal() {
+  authModalOpen = false;
+  const modal = document.getElementById('authModal');
+  if (modal) modal.style.display = 'none';
+}
+
+function saveAuthKey() {
+  const input = document.getElementById('authKeyInput');
+  const key = (input ? input.value : '').trim();
+  if (key) {
+    localStorage.setItem('relay_key', key);
+  }
+  closeAuthModal();
+  resumePolls();
+}
+
+function resumePolls() {
+  pollsPaused = false;
+  loadSettings();
+  refreshPool();
+}
+
+// Stale-state tracking: mark the UI as stale on poll failures, dedupe the
+// "lost connection" toast, and show "last updated Ns ago" from the last
+// successful fetch.
+let lastSuccessAt = 0;
+let staleToastShown = false;
+
+function noteSuccess() {
+  lastSuccessAt = Date.now();
+  staleToastShown = false;
+}
+
+function markStale() {
+  const pill = document.getElementById('statusPill');
+  const txt = document.getElementById('statusText');
+  if (pill) pill.className = 'status-dot error';
+  if (txt) txt.innerText = lastSuccessAt
+    ? 'STALE · ' + Math.round((Date.now() - lastSuccessAt) / 1000) + 's ago'
+    : 'STALE';
+  if (!staleToastShown) {
+    staleToastShown = true;
+    showToast('Lost connection to relay server', 'danger');
+  }
+}
+
+function onFetchError(e, ctx) {
+  if (e && e.auth) return; // 401 handled by apiFetch (auth modal)
+  console.warn(ctx + ' fetch failed:', e);
+  markStale();
+}
+
+// Time formatting helpers
+function formatCountdown(ms) {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? m + 'm ' + s + 's' : s + 's';
+}
+
+function formatDur(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? m + 'm ' + s + 's' : s + 's';
+}
+
+function formatUptime(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+// ── Advanced-settings numeric validation ───────────────────────
+const NUM_FIELDS = [
+  ['cfgMaxCandidates', 100, 10000],
+  ['cfgProbeTimeout', 5, 60],
+  ['cfgRelayTimeout', 10, 120],
+  ['cfgRelayAttempts', 1, 12],
+  ['cfgCooldownSec', 10, 3600],
+  ['cfgRecoverSec', 30, 7200]
+];
+
+function validateNumField(id, min, max) {
+  const input = document.getElementById(id);
+  if (!input) return true;
+  const errEl = document.getElementById('err' + id);
+  const v = parseFloat(input.value);
+  const badInput = !!(input.validity && input.validity.badInput);
+  const empty = !badInput && input.value.trim() === '';
+  const ok = !empty && !badInput && isFinite(v) && v >= min && v <= max;
+  input.classList.toggle('input-invalid', !ok);
+  if (errEl) {
+    errEl.textContent = ok ? '' :
+      (empty ? 'Required' : (badInput || !isFinite(v) ? 'Must be a number' : 'Must be ' + min + '–' + max));
+  }
+  return ok;
+}
+
+function allFieldsValid() {
+  let ok = true;
+  NUM_FIELDS.forEach(f => {
+    if (!validateNumField(f[0], f[1], f[2])) ok = false;
+  });
+  return ok;
+}
+
+function updateApplyDisabled() {
+  const btn = document.getElementById('btnApply');
+  if (btn) btn.disabled = !allFieldsValid();
+}
+
+function toggleRelayKeyVisibility() {
+  const input = document.getElementById('cfgRelayKey');
+  const btn = document.getElementById('btnToggleRelayKey');
+  if (!input || !btn) return;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  btn.innerText = show ? 'Hide' : 'Show';
+}
+
+// ── Per-second dashboard tick: parked countdowns + stale ticker ─
+function tickDashboard() {
+  document.querySelectorAll('.parked-countdown').forEach(el => {
+    const deadline = parseFloat(el.getAttribute('data-deadline') || '0') || 0;
+    const remain = deadline - Date.now();
+    el.innerText = remain > 0 ? formatCountdown(remain) : 'now';
+  });
+  const pill = document.getElementById('statusPill');
+  if (pill && pill.classList.contains('error') && lastSuccessAt) {
+    const txt = document.getElementById('statusText');
+    if (txt) txt.innerText = 'STALE · ' + Math.round((Date.now() - lastSuccessAt) / 1000) + 's ago';
+  }
+}
+
+// ── Proxy refresh button ───────────────────────────────────────
+async function refreshProxies() {
+  const btn = document.getElementById('btnRefresh');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerText = 'Refreshing...';
+  }
+  try {
+    const r = await apiFetch('/api/refresh', { method: 'POST' });
+    if (!r.ok) {
+      console.warn('refreshProxies: HTTP', r.status);
+      markStale();
+      showToast('Proxy refresh failed (HTTP ' + r.status + ')', 'danger');
+      return;
+    }
+    const d = await r.json();
+    showToast('Proxy refresh queued: ' + (d.queue ?? 0) + ' candidates, ' + (d.sources_ok ?? 0) + ' sources OK', 'success');
+  } catch (e) {
+    onFetchError(e, 'refreshProxies');
+    if (!(e && e.auth)) showToast('Proxy refresh request failed', 'danger');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerText = 'Refresh proxies now';
+    }
+  }
+}
+
 // Stats & configuration synchronization
 let settingsHydrated = false;
+let settingsSeq = 0;
+let poolTarget = 25;
+
 async function loadSettings() {
+  if (pollsPaused) return;
+  const seq = settingsSeq; // stale-response guard: skip hydration if the user edited meanwhile
   try {
-    const r = await fetch('/api/stats');
+    const r = await apiFetch('/api/stats');
+    if (!r.ok) {
+      console.warn('loadSettings: HTTP', r.status);
+      markStale();
+      return;
+    }
     const d = await r.json();
+    noteSuccess();
     
     // Set dynamic Base URL chip (always)
     document.getElementById('baseUrlVal').innerText = originHost + '/v1';
     
+    // Live values consumed by the engine-state pill and guide snippets
+    const s = d.settings || {};
+    poolTarget = Number(s.proxy_pool_target) || 25;
+    if (s.probe_model) liveModel = s.probe_model;
+    if (s.upstream_api_key) guideKey = s.upstream_api_key;
+    
     // Hydrate form fields ONLY on first load — never overwrite what the
-    // user is typing/editing on subsequent polls.
-    if (!settingsHydrated) {
-      settingsHydrated = true;
-      
-      // Upstream provider fields
-      document.getElementById('cfgUpstreamUrl').value = d.settings.upstream_base_url || '';
-      const upKey = d.settings.upstream_api_key || '';
+    // user is typing/editing on subsequent polls. ?? defaults for every key.
+    if (!settingsHydrated && seq === settingsSeq) {
+      document.getElementById('cfgUpstreamUrl').value = s.upstream_base_url ?? '';
+      const upKey = s.upstream_api_key ?? '';
       document.getElementById('cfgUpstreamKey').value =
         (upKey.includes('...') || upKey === '(none)') ? '' : upKey;
-      document.getElementById('cfgProbeModel').value = d.settings.probe_model || '';
+      document.getElementById('cfgProbeModel').value = s.probe_model ?? '';
       
       // Sliders
-      document.getElementById('cfgPoolTarget').value = d.settings.proxy_pool_target;
+      document.getElementById('cfgPoolTarget').value = s.proxy_pool_target ?? 30;
       updateSlider('PoolTarget');
-      document.getElementById('cfgConcurrency').value = d.settings.proxy_test_concurrency;
+      document.getElementById('cfgConcurrency').value = s.proxy_test_concurrency ?? 60;
       updateSlider('Concurrency');
       
       // Inputs & toggles
-      const wsToken = d.settings.webshare_token || '';
+      const wsToken = s.webshare_token ?? '';
       // If the server returns a masked value (contains '...'), show an empty
       // field so the user can type a new key without fighting the mask.
       document.getElementById('cfgWebshare').value =
         (wsToken.includes('...') || wsToken === '(none)') ? '' : wsToken;
-      document.getElementById('cfgDirectLane').checked = d.settings.direct_lane;
+      document.getElementById('cfgDirectLane').checked = s.direct_lane ?? false;
+      
+      // Advanced settings (masked relay key is passed through as-is)
+      document.getElementById('cfgRelayKey').value = s.relay_api_key ?? '';
+      document.getElementById('cfgAllowSocks').checked = s.allow_socks ?? true;
+      document.getElementById('cfgMaxCandidates').value = s.proxy_max_candidates ?? 3000;
+      document.getElementById('cfgProbeTimeout').value = s.proxy_probe_timeout ?? 25;
+      document.getElementById('cfgRelayTimeout').value = s.relay_proxy_timeout ?? 40;
+      document.getElementById('cfgRelayAttempts').value = s.relay_attempts ?? 6;
+      document.getElementById('cfgCooldownSec').value = s.lane_cooldown_sec ?? 90;
+      document.getElementById('cfgRecoverSec').value = s.lane_recover_sec ?? 240;
+      settingsHydrated = true;
+      updateApplyDisabled();
     }
     
     updateTelemetry(d);
+    renderGuide();
   } catch(e) {
-    showToast("Error reading settings");
+    onFetchError(e, 'loadSettings');
   }
 }
 
 async function saveSettings(e) {
   e.preventDefault();
+  if (!allFieldsValid()) {
+    showToast('Fix invalid settings before applying', 'danger');
+    return;
+  }
+  settingsSeq++; // bump so any in-flight stats response cannot clobber the save
   const btn = document.getElementById('btnApply');
   if (btn) btn.innerText = 'Saving...';
   
@@ -1220,24 +1665,44 @@ async function saveSettings(e) {
     proxy_pool_target: parseInt(document.getElementById('cfgPoolTarget').value),
     proxy_test_concurrency: parseInt(document.getElementById('cfgConcurrency').value),
     webshare_token: document.getElementById('cfgWebshare').value,
-    direct_lane: document.getElementById('cfgDirectLane').checked
+    direct_lane: document.getElementById('cfgDirectLane').checked,
+    relay_api_key: document.getElementById('cfgRelayKey').value,
+    allow_socks: document.getElementById('cfgAllowSocks').checked,
+    proxy_max_candidates: parseFloat(document.getElementById('cfgMaxCandidates').value),
+    proxy_probe_timeout: parseFloat(document.getElementById('cfgProbeTimeout').value),
+    relay_proxy_timeout: parseFloat(document.getElementById('cfgRelayTimeout').value),
+    relay_attempts: parseFloat(document.getElementById('cfgRelayAttempts').value),
+    lane_cooldown_sec: parseFloat(document.getElementById('cfgCooldownSec').value),
+    lane_recover_sec: parseFloat(document.getElementById('cfgRecoverSec').value)
   };
   
+  // Saving a real (unmasked) relay key applies to the relay AND becomes the
+  // dashboard key; masked '...' values are sent verbatim and ignored by the
+  // backend. An empty field removes the stored dashboard key.
+  const relayKeyVal = String(document.getElementById('cfgRelayKey').value).trim();
+  if (relayKeyVal && !relayKeyVal.includes('...') && relayKeyVal !== '(none)') {
+    localStorage.setItem('relay_key', relayKeyVal);
+  } else if (!relayKeyVal) {
+    localStorage.removeItem('relay_key');
+  }
+  
   try {
-    const r = await fetch('/api/settings', {
+    const r = await apiFetch('/api/settings', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload)
     });
     if (r.ok) {
       showToast("Settings saved successfully! Resetting proxy scraper...", "success");
+      resumePolls();
       // Run key validation to update health pills and status cards
       triggerKeyValidation();
     } else {
       showToast("Error updating settings", "danger");
     }
   } catch(e) {
-    showToast("Server request failed", "danger");
+    onFetchError(e, 'saveSettings');
+    if (!(e && e.auth)) showToast("Server request failed", "danger");
   } finally {
     if (btn) btn.innerText = 'Apply & Save';
   }
@@ -1260,11 +1725,16 @@ async function triggerKeyValidation() {
       webshare_token: document.getElementById('cfgWebshare').value
     };
     
-    const r = await fetch('/api/keys/validate', {
+    const r = await apiFetch('/api/keys/validate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload)
     });
+    if (!r.ok) {
+      console.warn('triggerKeyValidation: HTTP', r.status);
+      markStale();
+      return;
+    }
     
     const d = await r.json();
     
@@ -1274,7 +1744,7 @@ async function triggerKeyValidation() {
       valUpstream.innerHTML = `
         <span style="color: #a1a1aa;">Upstream:</span>
         <span class="val-status" style="color: ${up.valid ? '#4ade80' : '#f87171'}; font-weight: bold;">
-          ${up.valid ? `✓ VALID (${up.models_count} models)` : `✗ FAILED (${up.error})`}
+          ${up.valid ? '✓ VALID (' + esc(up.models_count) + ' models)' : '✗ FAILED (' + esc(up.error) + ')'}
         </span>
       `;
     }
@@ -1286,16 +1756,17 @@ async function triggerKeyValidation() {
       } else {
         valWebshare.innerHTML = d.webshare.map((w, idx) => `
           <div style="display: flex; align-items: center; justify-content: space-between; padding: 4px 0; border-top: 1px solid rgba(255,255,255,0.04);">
-            <span style="color: #a1a1aa;">Webshare Key #${idx+1} (${w.token}):</span>
+            <span style="color: #a1a1aa;">Webshare Key #${idx+1} (${esc(w.token)}):</span>
             <span style="color: ${w.valid ? '#4ade80' : '#f87171'}; font-weight: bold;">
-              ${w.valid ? `✓ VALID (${w.proxies} proxies)` : `✗ INVALID (${w.error})`}
+              ${w.valid ? '✓ VALID (' + esc(w.proxies) + ' proxies)' : '✗ INVALID (' + esc(w.error) + ')'}
             </span>
           </div>
         `).join('');
       }
     }
   } catch(e) {
-    showToast("Key validation failed: " + e.message, "danger");
+    onFetchError(e, 'triggerKeyValidation');
+    if (!(e && e.auth)) showToast("Key validation failed: " + e.message, "danger");
   } finally {
     if (btn) btn.innerText = 'Validate Keys';
   }
@@ -1307,7 +1778,6 @@ function clearLogs() {
   if (terminal) {
     terminal.innerHTML = '<div class="log-entry"><span class="log-time">[System]</span>Trace log cleared.</div>';
   }
-  lastLogCount = 0;
 }
 
 // Log badge formatting
@@ -1329,25 +1799,34 @@ function formatLogLine(line) {
   } else {
     timeStr = new Date().toLocaleTimeString();
   }
-  return `<div class="log-entry"><span class="log-time">[${timeStr}]</span><span style="color: ${color};">${msg}</span></div>`;
+  return `<div class="log-entry"><span class="log-time">[${esc(timeStr)}]</span><span style="color: ${color};">${esc(msg)}</span></div>`;
 }
 
 // Dynamic telemetry UI updates
-let laneLogCount = 0;
-let lastLogCount = 0;
 
 function updateTelemetry(data) {
+  const pool = data.pool || {};
+  const stats = data.stats || {};
+  
   // Counters
-  document.getElementById('cWarm').innerText = data.pool.warm;
-  document.getElementById('cParked').innerText = data.pool.parked;
-  document.getElementById('cRequests').innerText = data.stats.requests;
-  document.getElementById('cFailovers').innerText = data.stats.failovers;
+  document.getElementById('cWarm').innerText = pool.warm ?? 0;
+  document.getElementById('cParked').innerText = pool.parked ?? 0;
+  document.getElementById('cRequests').innerText = stats.requests ?? 0;
+  document.getElementById('cFailovers').innerText = stats.failovers ?? 0;
+  
+  // Extended stats
+  document.getElementById('statUptime').innerText = formatUptime(data.uptime_sec);
+  document.getElementById('statSources').innerText = pool.sources_ok ?? 0;
+  document.getElementById('statLatency').innerText =
+    (pool.best_latency_ms != null) ? Math.round(pool.best_latency_ms) + 'ms' : '-';
+  document.getElementById('statProbes').innerText =
+    (stats.probes_ok ?? 0) + ' / ' + (stats.probes_burned ?? 0);
   
   // Status Indicator
   const pill = document.getElementById('statusPill');
   const txt = document.getElementById('statusText');
   
-  if (data.pool.warm > 0) {
+  if ((pool.warm ?? 0) > 0) {
     pill.className = 'status-dot';
     txt.innerText = 'operational';
   } else {
@@ -1356,15 +1835,17 @@ function updateTelemetry(data) {
   }
 
   // Engine Live Banner Details
-  document.getElementById('engineQueue').innerText = data.pool.queue;
-  document.getElementById('engineTested').innerText = data.stats.candidates_tested;
-  document.getElementById('engineWarm').innerText = data.pool.warm;
+  document.getElementById('engineQueue').innerText = pool.queue ?? 0;
+  document.getElementById('engineTested').innerText = stats.candidates_tested ?? 0;
+  document.getElementById('engineWarm').innerText = pool.warm ?? 0;
+  document.getElementById('engineFails').innerText = stats.lane_failures ?? 0;
+  document.getElementById('engineStreams').innerText = stats.streams ?? 0;
 
   const engineState = document.getElementById('engineState');
-  if (data.pool.queue > 0) {
-    engineState.innerText = `PROBING (${data.pool.queue} QUEUED)`;
+  if ((pool.queue ?? 0) > 0) {
+    engineState.innerText = `PROBING (${pool.queue} QUEUED)`;
     engineState.style.color = '#facc15'; // Amber
-  } else if (data.pool.warm >= 25) {
+  } else if ((pool.warm ?? 0) >= poolTarget) {
     engineState.innerText = 'IDLE (POOL WARM)';
     engineState.style.color = '#4ade80'; // Green
   } else {
@@ -1374,98 +1855,120 @@ function updateTelemetry(data) {
 }
 
 async function refreshPool() {
+  if (pollsPaused) return;
   try {
-    const r = await fetch('/api/pool');
+    const r = await apiFetch('/api/pool');
+    if (!r.ok) {
+      console.warn('refreshPool: HTTP', r.status);
+      markStale();
+      return;
+    }
     const d = await r.json();
+    noteSuccess();
     
     // Sync telemetry network visualizer graph
     if (typeof syncNetworkGraph === 'function') {
-      syncNetworkGraph(d.warm);
+      syncNetworkGraph(d.warm || []);
     }
     
     const rows = document.getElementById('laneRows');
     const ratio = document.getElementById('laneRatio');
     
-    const total = d.warm.length + d.parked.length;
-    ratio.innerText = `${d.warm.length} / ${total} lanes warm`;
+    const warm = d.warm || [];
+    const parked = d.parked || [];
+    // Backend may cap the displayed lists; prefer the totals when present.
+    const totalWarm = (d.total_warm != null) ? d.total_warm : warm.length;
+    const totalParked = (d.total_parked != null) ? d.total_parked : parked.length;
+    ratio.innerText = `${totalWarm} / ${totalWarm + totalParked} total`;
     
-    if (d.warm.length === 0 && d.parked.length === 0) {
+    if (warm.length === 0 && parked.length === 0) {
       rows.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;">Discovering egress pathways...</td></tr>`;
       return;
     }
     
     let html = '';
     // Sort warm lanes by score then latency
-    const sorted = [...d.warm].sort((a,b) => b.score - a.score || a.lat_ms - b.lat_ms);
+    const sorted = [...warm].sort((a,b) => (b.score || 0) - (a.score || 0) || (a.lat_ms || 0) - (b.lat_ms || 0));
     
     sorted.forEach(ln => {
-      const latVal = ln.lat_ms ? `${Math.round(ln.lat_ms)}ms` : '-';
-      const scorePct = Math.round(ln.score * 100);
+      const latVal = ln.lat_ms ? Math.round(ln.lat_ms) + 'ms' : '-';
+      const scorePct = Math.max(0, Math.min(100, Math.round((ln.score || 0) * 100)));
+      const lastOkAgo = (ln.last_ok_ago != null)
+        ? ' <span style="opacity: 0.6;">· ' + esc(formatDur(ln.last_ok_ago)) + ' ago</span>'
+        : '';
       
       html += `
         <tr>
-          <td class="mono-cell">${ln.addr}</td>
-          <td><span class="badge-proto">${ln.proto}</span></td>
+          <td class="mono-cell">${esc(ln.addr || '')}</td>
+          <td><span class="badge-proto">${esc(ln.proto || '')}</span></td>
           <td>
             <div class="score-bar-bg">
               <div class="score-bar-fill" style="width: ${scorePct}%;"></div>
             </div>
             <span style="font-family: var(--font-mono); font-size: 11px;">${scorePct}%</span>
           </td>
-          <td class="mono-cell">${latVal}</td>
-          <td class="mono-cell" style="color: var(--text-muted);">${ln.ok} / ${ln.fail}</td>
+          <td class="mono-cell">${esc(latVal)}</td>
+          <td class="mono-cell" style="color: var(--text-muted);">${ln.ok ?? 0} / ${ln.fails ?? 0}${lastOkAgo}</td>
         </tr>
       `;
     });
     
     // Append parked/cooldown lanes at the bottom
-    d.parked.forEach(ln => {
+    parked.forEach(ln => {
+      const untilMs = (ln.until_in || 0) * 1000;
+      const deadline = Date.now() + untilMs;
+      const probeAgo = (ln.last_probe_ago != null)
+        ? ' <span style="opacity: 0.6;">· probed ' + esc(formatDur(ln.last_probe_ago)) + ' ago</span>'
+        : '';
+      
       html += `
         <tr style="opacity: 0.4;">
-          <td class="mono-cell">${ln.addr}</td>
-          <td><span class="badge-proto">${ln.proto}</span></td>
+          <td class="mono-cell">${esc(ln.addr || '')}</td>
+          <td><span class="badge-proto">${esc(ln.proto || '')}</span></td>
           <td>
             <div class="score-bar-bg"><div class="score-bar-fill" style="width: 0%; background: var(--danger);"></div></div>
             <span style="font-family: var(--font-mono); font-size: 11px;">cooldown</span>
           </td>
-          <td class="mono-cell">-</td>
-          <td class="mono-cell" style="color: var(--text-muted);">${ln.ok} / ${ln.fail}</td>
+          <td class="mono-cell">
+            <span class="parked-countdown" data-deadline="${deadline}">${untilMs > 0 ? formatCountdown(untilMs) : 'now'}</span>${probeAgo}
+          </td>
+          <td class="mono-cell" style="color: var(--text-muted);">—</td>
         </tr>
       `;
     });
     
     rows.innerHTML = html;
-  } catch(e) {}
+  } catch(e) {
+    onFetchError(e, 'refreshPool');
+  }
 }
 
 // Read and stream real server logs into the trace container
 async function pollLogs() {
+  if (pollsPaused) return;
   try {
-    const [rLogs, rStats] = await Promise.all([
-      fetch('/api/logs'),
-      fetch('/api/stats')
-    ]);
-    
-    if (rStats.ok) {
-      const stats = await rStats.json();
-      updateTelemetry(stats);
+    const rLogs = await apiFetch('/api/logs');
+    if (!rLogs.ok) {
+      console.warn('pollLogs: HTTP', rLogs.status);
+      markStale();
+      return;
     }
+    const d = await rLogs.json();
+    noteSuccess();
+    const terminal = document.getElementById('terminalLogs');
+    const autoscroll = document.getElementById('logAutoscroll') ? document.getElementById('logAutoscroll').checked : true;
     
-    if (rLogs.ok) {
-      const d = await rLogs.json();
-      const terminal = document.getElementById('terminalLogs');
-      const autoscroll = document.getElementById('logAutoscroll') ? document.getElementById('logAutoscroll').checked : true;
-      
-      if (d.lines && d.lines.length > 0) {
-        terminal.innerHTML = d.lines.map(line => formatLogLine(line)).join('');
-        if (autoscroll) {
-          terminal.scrollTop = terminal.scrollHeight;
-        }
-      } else if (!terminal.innerHTML.trim()) {
-        terminal.innerHTML = '<div class="log-entry"><span class="log-time">[System]</span>Listening for live engine telemetry...</div>';
+    if (d.lines && d.lines.length > 0) {
+      terminal.innerHTML = d.lines.map(line => formatLogLine(line)).join('');
+      if (autoscroll) {
+        terminal.scrollTop = terminal.scrollHeight;
       }
+    } else if (!terminal.innerHTML.trim()) {
+      terminal.innerHTML = '<div class="log-entry"><span class="log-time">[System]</span>Listening for live engine telemetry...</div>';
     }
-  } catch(e) {}
+  } catch(e) {
+    onFetchError(e, 'pollLogs');
+  }
 }
 
 // ── Live Network Graph Visualizer ──────────────────
@@ -1693,15 +2196,24 @@ function animNetworkGraph() {
 
 // Initialize page
 window.addEventListener('DOMContentLoaded', () => {
+  // Any form edit bumps the sequence counter so in-flight stats responses
+  // can never clobber what the user just typed.
+  const form = document.getElementById('settingsForm');
+  if (form) form.addEventListener('input', () => { settingsSeq++; });
+  const authInput = document.getElementById('authKeyInput');
+  if (authInput) authInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveAuthKey();
+  });
+  
   loadSettings();
   renderGuide();
   resizeNetCanvas();
   animNetworkGraph();
   window.addEventListener('resize', resizeNetCanvas);
   
-  setInterval(loadSettings, 4000);
-  setInterval(refreshPool, 3000);
-  setInterval(pollLogs, 2500);
+  setInterval(tickDashboard, 1000);                        // parked countdowns + stale ticker
+  setInterval(() => { loadSettings(); refreshPool(); }, 3000); // consolidated stats/pool cadence
+  setInterval(pollLogs, 2500);                             // logs only
 });
 </script>
 </body>
