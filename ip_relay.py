@@ -41,6 +41,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
 
@@ -227,11 +228,20 @@ def public_settings() -> dict:
 # ── log ring buffer (dashboard log viewer) ──────────────────────
 LOG_RING = collections.deque(maxlen=600)
 
+# Proxy credentials (user:pass@host:port) must never reach the log ring:
+# /api/logs is reachable by anyone who can reach the dashboard, and when
+# relay_api_key is empty that is the whole internet. Strip the userinfo part.
+_CRED_RE = re.compile(r"\b[A-Za-z0-9_\-.]{2,64}:[^\s/@]{2,64}@(?=[\w.\-]+:\d{2,5})")
+
+
+def scrub_creds(text: str) -> str:
+    return _CRED_RE.sub("", text)
+
 
 class RingHandler(logging.Handler):
     def emit(self, record):
         try:
-            LOG_RING.append(self.format(record))
+            LOG_RING.append(scrub_creds(self.format(record)))
         except Exception:
             pass
 
