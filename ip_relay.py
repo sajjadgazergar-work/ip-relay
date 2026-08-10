@@ -2463,7 +2463,7 @@ async def anthropic_messages(request: Request):
         return StreamingResponse(iter([openai_sse_to_anthropic(body, payload["model"])]), media_type="text/event-stream")
     return Response(content=openai_to_anthropic(body, payload["model"]), media_type="application/json")
 
-DASHBOARD_HTML = open(os.path.join(os.path.dirname(__file__), "dashboard.html")).read() \
+DASHBOARD_HTML = open(os.path.join(os.path.dirname(__file__), "dashboard.html"), encoding="utf-8").read() \
     if os.path.exists(os.path.join(os.path.dirname(__file__), "dashboard.html")) else "<h1>dashboard.html missing</h1>"
 
 
