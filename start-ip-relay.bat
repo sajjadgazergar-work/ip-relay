@@ -8,13 +8,13 @@ echo  ip-relay // egress rotator launcher
 echo =========================================================
 
 if not exist ".venv\Scripts\python.exe" (
-    echo [!] Python virtual environment (.venv) not found in this folder.
+    echo [!] Python virtual environment (.venv) not found.
     echo     Initializing virtual environment and installing dependencies...
     echo.
     
-    where python >nul 2>nul
+    python -m venv .venv 2>nul
     if errorlevel 1 (
-        where py >nul 2>nul
+        py -3 -m venv .venv 2>nul
         if errorlevel 1 (
             echo [ERROR] Python 3 was not found on your system!
             echo Please install Python 3 from https://python.org and make sure
@@ -23,16 +23,6 @@ if not exist ".venv\Scripts\python.exe" (
             pause
             exit /b 1
         )
-        set PY_CMD=py -3
-    ) else (
-        set PY_CMD=python
-    )
-
-    %PY_CMD% -m venv .venv
-    if errorlevel 1 (
-        echo [ERROR] Failed to create virtual environment!
-        pause
-        exit /b 1
     )
     
     echo [i] Installing required packages...
