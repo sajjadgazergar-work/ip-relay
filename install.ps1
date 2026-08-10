@@ -91,13 +91,19 @@ Log 'Installing dependencies ...'
 # ── start ─────────────────────────────────────────────────
 if ($Manual) {
   Log "Manual mode — run:"
-  Log "  & '$Dir\.venv\Scripts\python.exe' -m uvicorn ip_relay:app --host 0.0.0.0 --port 8080"
+  Log "  & '$Dir\.venv\Scripts\python.exe' -m uvicorn ip_relay:app --host 0.0.0.0 --port 18080"
 } else {
   Log 'Creating one-click launcher ...'
   $bat = @"
 @echo off
-cd /d "$Dir"
-".venv\Scripts\python.exe" -m uvicorn ip_relay:app --host 0.0.0.0 --port 8080
+cd /d "%~dp0"
+if not exist ".venv\Scripts\python.exe" (
+  echo [ERROR] Virtual environment (.venv) not found. Run install.ps1 to setup.
+  pause
+  exit /b 1
+)
+".venv\Scripts\python.exe" -m uvicorn ip_relay:app --host 0.0.0.0 --port 18080
+if errorlevel 1 pause
 "@
   Set-Content -Path "$Dir\start-ip-relay.bat" -Value $bat -Encoding ASCII
   Log "Launcher: $Dir\start-ip-relay.bat (double-click to run)"
@@ -106,4 +112,4 @@ cd /d "$Dir"
 Log "Installed. Next steps:"
 Log "  code dir : $Dir"
 Log "  start    : $Dir\start-ip-relay.bat"
-Log '  dashboard: http://localhost:8080'
+Log '  dashboard: http://localhost:18080'
