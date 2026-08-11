@@ -55,7 +55,7 @@ log = logging.getLogger("ip-relay")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S"
+    datefmt="%H:%M:%S",
 )
 
 VERSION = "0.9.0"
@@ -348,12 +348,12 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     global CLUSTERING_ENABLED, CLUSTER_REDIS_URL, CLUSTER_NODE_ID
     global ML_PREDICTION_ENABLED, ML_MODEL_PATH
     global ALERT_WEBHOOK_URL, ALERT_POOL_THRESHOLD, WEBSOCKET_SUPPORT
-    
+
     old_base, old_key = UPSTREAM_BASE_URL, UPSTREAM_API_KEY
     for k, v in new.items():
         if k in DEFAULTS:
             settings[k] = v
-    
+
     # Core settings
     UPSTREAM_API_KEY = str(settings["upstream_api_key"]).strip()
     UPSTREAM_BASE_URL = str(settings["upstream_base_url"]).rstrip("/")
@@ -374,7 +374,7 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     MAX_LANES_PER_SUBNET = max(0, int(settings["max_lanes_per_subnet"]))
     ADAPTIVE_CONCURRENCY = bool(settings["adaptive_concurrency"])
     PERSIST_LANES = bool(settings["persist_lanes"])
-    
+
     # v0.9 settings
     STICKY_SESSIONS = bool(settings["sticky_sessions"])
     STICKY_SESSION_TTL = max(60, int(settings["sticky_session_ttl"]))
@@ -399,7 +399,7 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     ALERT_WEBHOOK_URL = str(settings["alert_webhook_url"])
     ALERT_POOL_THRESHOLD = max(1, int(settings["alert_pool_threshold"]))
     WEBSOCKET_SUPPORT = bool(settings["websocket_support"])
-    
+
     if not ADAPTIVE_CONCURRENCY:
         ADAPT["current"] = TEST_CONCURRENCY
     else:
@@ -478,24 +478,24 @@ def check_rate_limit(client_id: str) -> tuple[bool, int]:
     """Check rate limit for client. Returns (allowed, retry_after)."""
     if not RATE_LIMIT_REQUESTS > 0:
         return True, 0
-    
+
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW
-    
+
     if client_id not in RATE_LIMIT_STATE:
         RATE_LIMIT_STATE[client_id] = [(now, 1)]
         return True, 0
-    
+
     # Clean old entries
     RATE_LIMIT_STATE[client_id] = [(t, c) for t, c in RATE_LIMIT_STATE[client_id] if t > window_start]
-    
+
     total_requests = sum(c for _, c in RATE_LIMIT_STATE[client_id])
-    
+
     if total_requests >= RATE_LIMIT_REQUESTS:
         oldest = min(t for t, _ in RATE_LIMIT_STATE[client_id])
         retry_after = int(oldest + RATE_LIMIT_WINDOW - now) + 1
         return False, max(1, retry_after)
-    
+
     # Add current request
     if RATE_LIMIT_STATE[client_id]:
         last_time, last_count = RATE_LIMIT_STATE[client_id][-1]
@@ -505,7 +505,7 @@ def check_rate_limit(client_id: str) -> tuple[bool, int]:
             RATE_LIMIT_STATE[client_id].append((now, 1))
     else:
         RATE_LIMIT_STATE[client_id] = [(now, 1)]
-    
+
     return True, 0
 
 
@@ -513,7 +513,7 @@ def get_sticky_lane(session_id: str) -> Lane | None:
     """Get lane for sticky session if exists and not expired."""
     if not STICKY_SESSIONS or not session_id:
         return None
-    
+
     now = time.time()
     if session_id in STICKY_SESSIONS_MAP:
         lane_addr, expiry = STICKY_SESSIONS_MAP[session_id]
@@ -537,17 +537,17 @@ def set_sticky_lane(session_id: str, lane: Lane) -> None:
 def cleanup_expired_state() -> None:
     """Periodic cleanup of expired idempotency keys and sticky sessions."""
     now = time.time()
-    
+
     # Cleanup idempotency cache
     expired_keys = [k for k, (_, expiry) in IDEMPOTENCY_CACHE.items() if now >= expiry]
     for k in expired_keys:
         del IDEMPOTENCY_CACHE[k]
-    
+
     # Cleanup sticky sessions
     expired_sessions = [k for k, (_, expiry) in STICKY_SESSIONS_MAP.items() if now >= expiry]
     for k in expired_sessions:
         del STICKY_SESSIONS_MAP[k]
-    
+
     # Cleanup rate limit state (keep only last window)
     window_start = now - RATE_LIMIT_WINDOW * 2
     for client_id in list(RATE_LIMIT_STATE.keys()):
@@ -560,21 +560,21 @@ async def send_alert_webhook(alert_type: str, message: str, details: dict | None
     """Send alert to configured webhook URL. Returns True if sent successfully."""
     if not ALERT_WEBHOOK_URL:
         return False
-    
+
     now = time.time()
     # Rate limit alerts: max 1 per minute per alert type
     last_sent = ALERT_LAST_SENT.get(alert_type, 0)
     if now - last_sent < 60:
         return False
-    
+
     payload = {
         "alert_type": alert_type,
         "message": message,
         "timestamp": now,
         "node_id": CLUSTER_NODE_ID,
-        "details": details or {}
+        "details": details or {},
     }
-    
+
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
             response = await client.post(ALERT_WEBHOOK_URL, json=payload)
@@ -594,19 +594,19 @@ async def check_upstream_health() -> None:
     """Periodically check upstream health and update cache."""
     if not UPSTREAM_HEALTH_CHECK or not UPSTREAM_BASE_URL:
         return
-    
+
     now = time.time()
-    healthy, last_check, error = UPSTREAM_HEALTH.get(UPSTREAM_BASE_URL, (True, 0, ""))
-    
+    _healthy, last_check, _error = UPSTREAM_HEALTH.get(UPSTREAM_BASE_URL, (True, 0, ""))
+
     # Only check if interval has passed
     if now - last_check < UPSTREAM_HEALTH_INTERVAL:
         return
-    
+
     try:
         headers = {}
         if UPSTREAM_API_KEY and UPSTREAM_API_KEY != "(none)":
             headers["Authorization"] = f"Bearer {UPSTREAM_API_KEY}"
-        
+
         async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=4), verify=False) as client:
             response = await client.get(f"{UPSTREAM_BASE_URL}/models", headers=headers)
             if response.status_code == 200:
@@ -616,27 +616,27 @@ async def check_upstream_health() -> None:
                 error_msg = f"HTTP {response.status_code}"
                 UPSTREAM_HEALTH[UPSTREAM_BASE_URL] = (False, now, error_msg)
                 log.warning("Upstream health check failed: %s", error_msg)
-                
+
                 # Send alert if threshold breached
                 pool_count = len([l for l in POOL.warm_lanes() if not l.burned])
                 if pool_count < ALERT_POOL_THRESHOLD:
                     await send_alert_webhook(
                         "upstream_unhealthy",
                         f"Upstream {UPSTREAM_BASE_URL} returned {response.status_code}",
-                        {"status_code": response.status_code, "pool_size": pool_count}
+                        {"status_code": response.status_code, "pool_size": pool_count},
                     )
     except Exception as e:
         error_msg = str(e)
         UPSTREAM_HEALTH[UPSTREAM_BASE_URL] = (False, now, error_msg)
         log.warning("Upstream health check error: %s", error_msg)
-        
+
         # Send alert if threshold breached
         pool_count = len([l for l in POOL.warm_lanes() if not l.burned])
         if pool_count < ALERT_POOL_THRESHOLD:
             await send_alert_webhook(
                 "upstream_error",
                 f"Upstream {UPSTREAM_BASE_URL} error: {error_msg}",
-                {"error": error_msg, "pool_size": pool_count}
+                {"error": error_msg, "pool_size": pool_count},
             )
 
 
@@ -644,13 +644,13 @@ async def monitor_pool_threshold() -> None:
     """Monitor pool size and send alerts when below threshold."""
     if not ALERT_WEBHOOK_URL:
         return
-    
+
     pool_count = len([l for l in POOL.warm_lanes() if not l.burned])
     if pool_count < ALERT_POOL_THRESHOLD:
         await send_alert_webhook(
             "pool_low",
             f"Proxy pool size ({pool_count}) below threshold ({ALERT_POOL_THRESHOLD})",
-            {"pool_size": pool_count, "threshold": ALERT_POOL_THRESHOLD}
+            {"pool_size": pool_count, "threshold": ALERT_POOL_THRESHOLD},
         )
 
 
@@ -674,7 +674,7 @@ async def validate_webshare_token(token: str) -> dict:
         async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=4)) as client:
             r = await client.get(
                 "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=1",
-                headers={"Authorization": f"Token {tok}"}
+                headers={"Authorization": f"Token {tok}"},
             )
             if r.status_code == 200:
                 count = r.json().get("count", 0)
@@ -755,7 +755,7 @@ class RingHandler(logging.Handler):
 handler = RingHandler()
 handler.setFormatter(logging.Formatter(
     fmt="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S"
+    datefmt="%H:%M:%S",
 ))
 logging.getLogger().addHandler(handler)
 
@@ -771,9 +771,22 @@ class Lane:
 
     score: EWMA in [0,1]. Success pushes toward 1, failure toward 0. Requests
     prefer the highest-scored warm lane. Latency is tracked for ranking."""
-    __slots__ = ("addr", "proto", "score", "lat_ms", "ok", "fails",
-                 "parked_until", "last_ok", "last_probe", "probe_tries",
-                 "consec_fails", "inflight", "_sem", "created")
+    __slots__ = (
+        "_sem",
+        "addr",
+        "consec_fails",
+        "created",
+        "fails",
+        "inflight",
+        "last_ok",
+        "last_probe",
+        "lat_ms",
+        "ok",
+        "parked_until",
+        "probe_tries",
+        "proto",
+        "score",
+    )
 
     def __init__(self, addr: str, proto: str):
         self.addr = addr            # "ip:port" or "" for the direct lane
@@ -870,7 +883,7 @@ class Lane:
                 "last_ok": round(self.last_ok, 1)}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Lane":
+    def from_dict(cls, d: dict) -> Lane:
         ln = cls(str(d.get("addr", "")), str(d.get("proto", "http")))
         ln.score = float(d.get("score", 0.5))
         ln.lat_ms = float(d.get("lat_ms", 0.0))
@@ -994,7 +1007,7 @@ def record_request(lane: str, status: int, ms: float, stream: bool = False) -> N
 def _pct(sorted_vals: list[float], q: float) -> float:
     if not sorted_vals:
         return 0.0
-    idx = min(len(sorted_vals) - 1, max(0, int(round(q * (len(sorted_vals) - 1)))))
+    idx = min(len(sorted_vals) - 1, max(0, round(q * (len(sorted_vals) - 1))))
     return sorted_vals[idx]
 
 
@@ -1165,7 +1178,7 @@ def _valid_addr(addr: str) -> bool:
 
 async def _fetch_sources() -> None:
     """Pull all feeds, fill the candidate reservoir with proto://addr entries.
-    
+
     v0.9 enhancements:
     - IPv6 support (when enabled)
     - Geographic filtering (when enabled)
@@ -1260,7 +1273,7 @@ async def _fetch_sources() -> None:
             # Split tokens by comma, semicolon, newline, or whitespace to support multiple accounts/keys
             import re
             tokens = [t.strip() for t in re.split(r"[\s,;\n\r]+", WEBSHARE_TOKEN) if t.strip()]
-            
+
             async def fetch_one_token(token):
                 nonlocal added, ok
                 try:
@@ -1290,7 +1303,7 @@ async def _fetch_sources() -> None:
                     pass
 
             await asyncio.gather(*[fetch_one_token(tok) for tok in tokens])
-        
+
         # v0.9: Bright Data integration (placeholder for Tier 2 paid providers)
         async def brightdata():
             # Placeholder for Bright Data API integration
@@ -1300,7 +1313,7 @@ async def _fetch_sources() -> None:
                 return
             # Implementation would fetch from Bright Data API
             pass
-        
+
         # v0.9: Oxylabs integration (placeholder for Tier 2 paid providers)
         async def oxylabs():
             # Placeholder for Oxylabs API integration
@@ -1794,24 +1807,24 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
         if cached is not None:
             log.info("idempotency hit for key %s", mask_key(idem_key))
             return 200, {"content-type": "application/json"}, cached
-    
+
     # Check rate limit
     client_id = headers.get("X-Client-ID", headers.get("x-forwarded-for", "anonymous"))
     allowed, retry_after = check_rate_limit(client_id)
     if not allowed:
         body = json.dumps({"error": {"message": f"Rate limit exceeded. Retry after {retry_after}s", "type": "rate_limit"}}).encode()
         return 429, {"content-type": "application/json", "Retry-After": str(retry_after)}, body
-    
+
     # Check sticky session
     session_id = headers.get("X-Relay-Session-ID") or headers.get("x-relay-session-id")
     sticky_lane = get_sticky_lane(session_id) if session_id else None
-    
+
     attempts = max(1, RELAY_ATTEMPTS)
     deadline = time.time() + timeout
     last_err: tuple | None = None
     tried: set[str] = set()
     t_start = time.time()
-    
+
     # Pre-flight upstream health check
     if UPSTREAM_HEALTH_CHECK and UPSTREAM_BASE_URL:
         healthy, last_check, error = UPSTREAM_HEALTH.get(UPSTREAM_BASE_URL, (True, 0, ""))
@@ -1837,7 +1850,7 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                     break
             lane = _pick_lane(lanes) if i == 0 else lanes[0]
             tried.add(f"{lane.proto}://{lane.addr}")
-        
+
         # Bind session to lane on first successful use
         if session_id and not sticky_lane:
             set_sticky_lane(session_id, lane)
@@ -1917,17 +1930,17 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
         record_request("-", last_err[0], (time.time() - t_start) * 1000, stream)
         publish("request", {"lane": "-", "status": last_err[0], "ms": round((time.time() - t_start) * 1000)})
         return last_err[0], {"content-type": "application/json"}, last_err[1]
-    
+
     # Cache response for idempotency if key was provided
     if idem_key:
         cache_idempotency(idem_key, json.dumps(
-            {"error": {"message": "all egress lanes busy or failed — pool is refilling, retry shortly", "type": "rotator_exhausted"}}
+            {"error": {"message": "all egress lanes busy or failed — pool is refilling, retry shortly", "type": "rotator_exhausted"}},
         ).encode())
-    
+
     record_request("-", 503, (time.time() - t_start) * 1000, stream)
     publish("request", {"lane": "-", "status": 503, "ms": round((time.time() - t_start) * 1000)})
     return 503, {"content-type": "application/json"}, json.dumps(
-        {"error": {"message": "all egress lanes busy or failed — pool is refilling, retry shortly", "type": "rotator_exhausted"}}
+        {"error": {"message": "all egress lanes busy or failed — pool is refilling, retry shortly", "type": "rotator_exhausted"}},
     ).encode()
 
 
@@ -2080,7 +2093,7 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
     if last_err and isinstance(last_err[0], int) and last_err[0] >= 500:
         return last_err[0], {"content-type": "application/json"}, _stream_one(last_err[1])
     return 503, {"content-type": "application/json"}, _stream_one(json.dumps(
-        {"error": {"message": "all egress lanes busy or failed — pool is refilling, retry shortly", "type": "rotator_exhausted"}}
+        {"error": {"message": "all egress lanes busy or failed — pool is refilling, retry shortly", "type": "rotator_exhausted"}},
     ).encode())
 
 
@@ -2424,7 +2437,7 @@ async def lifespan(_app: FastAPI):
 
     # 1. SOCKS library validation
     try:
-        import socksio  # noqa: F401
+        import socksio
     except ImportError:
         log.error("CRITICAL ERROR: SOCKS proxy support is missing! SOCKS4/5 proxies will be ignored. "
                   "Please run: pip install 'httpx[socks]' to install SOCKS dependencies.")
@@ -2461,14 +2474,14 @@ async def lifespan(_app: FastAPI):
                           "Verify your network or UPSTREAM_BASE_URL ('%s').", e, UPSTREAM_BASE_URL)
 
         tasks.append(asyncio.create_task(verify_upstream()))
-        
+
         # v0.9: Start background health monitoring and alerting tasks
         if UPSTREAM_HEALTH_CHECK:
             tasks.append(asyncio.create_task(upstream_health_monitor()))
-        
+
         if ALERT_WEBHOOK_URL:
             tasks.append(asyncio.create_task(pool_threshold_monitor()))
-        
+
         # Start periodic state cleanup task
         tasks.append(asyncio.create_task(state_cleanup_loop()))
 
@@ -2532,7 +2545,7 @@ def config_warnings() -> list[str]:
         out.append("relay_api_key is empty — the control plane and /v1 are UNAUTHENTICATED. "
                    "Anyone who can reach this port can read your proxy pool and repoint the upstream.")
     try:
-        import socksio  # noqa: F401
+        import socksio
     except ImportError:
         if ALLOW_SOCKS:
             out.append("allow_socks is on but socksio is not installed — every SOCKS "
@@ -2540,10 +2553,10 @@ def config_warnings() -> list[str]:
     if TEST_CONCURRENCY > 40:
         out.append(f"proxy_test_concurrency is {TEST_CONCURRENCY}: on a residential/CPE link this "
                    "saturates the NAT table and every probe fails with connect errors. "
-                   "15–25 is the safe range (adaptive concurrency will also back off on its own).")
+                   "15-25 is the safe range (adaptive concurrency will also back off on its own).")
     if LANE_MAX_INFLIGHT > 4:
         out.append(f"lane_max_inflight is {LANE_MAX_INFLIGHT}: free proxies typically survive "
-                   "1–2 concurrent requests before dropping.")
+                   "1-2 concurrent requests before dropping.")
     return out
 
 
@@ -2648,7 +2661,7 @@ async def api_diagnostics(request: Request):
             verdict = "egress_blocked"
             advice = ("Probes cannot open outbound connections to proxy ports. A VPN, firewall, "
                       "or ISP filter is blocking non-80/443 traffic, or the link's NAT table is "
-                      "saturated. Lower proxy_test_concurrency (15–25) and retry without the VPN.")
+                      "saturated. Lower proxy_test_concurrency (15-25) and retry without the VPN.")
         elif top == "http_401_bad_key":
             verdict = "bad_upstream_key"
             advice = "The upstream rejects the API key (401). Fix upstream_api_key."
@@ -2682,7 +2695,7 @@ async def api_diagnostics(request: Request):
 
 def _socks_available() -> bool:
     try:
-        import socksio  # noqa: F401
+        import socksio
         return True
     except ImportError:
         return False
@@ -2786,7 +2799,7 @@ async def post_settings(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
-    
+
     updates, errors = validate_settings_payload(body)
     if errors:
         return JSONResponse({"error": "invalid settings", "details": errors}, status_code=400)
@@ -2800,7 +2813,9 @@ async def post_settings(request: Request):
         log.info("Settings: Webshare tokens updated — resetting scraper interval to force immediate proxy check.")
         POOL.last_fetch = 0.0
         # Immediately kick off scraping & batch churning in the background
-        asyncio.create_task(_fetch_sources())
+        _fetch_task = asyncio.create_task(_fetch_sources())
+        # Store reference to prevent garbage collection of fire-and-forget task
+        app.state._fetch_task = _fetch_task
 
     return res
 
@@ -2830,18 +2845,18 @@ async def api_validate_keys(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
-    
+
     # 1. Validate Webshare Tokens
     webshare_tokens = body.get("webshare_token", "").strip()
     import re
     orig_token = str(settings.get("webshare_token", ""))
     orig_tokens = [o.strip() for o in re.split(r"[\s,;\n\r]+", orig_token) if o.strip()]
-    
+
     if not webshare_tokens:
         tokens = list(orig_tokens)
     else:
         tokens = [t.strip() for t in re.split(r"[\s,;\n\r]+", webshare_tokens) if t.strip()]
-        
+
     resolved_tokens = []
     for t in tokens:
         if "..." in t or t == "(none)":
@@ -2855,20 +2870,20 @@ async def api_validate_keys(request: Request):
                 resolved_tokens.append(orig_tokens[0])
         else:
             resolved_tokens.append(t)
-            
+
     webshare_results = await asyncio.gather(*[validate_webshare_token(tok) for tok in resolved_tokens])
-    
+
     # 2. Validate Upstream URL & Key
     upstream_url = body.get("upstream_base_url", "").strip() or UPSTREAM_BASE_URL
     upstream_key = body.get("upstream_api_key", "").strip()
     if not upstream_key or "..." in upstream_key or upstream_key == "(none)":
         upstream_key = str(settings.get("upstream_api_key", ""))
-        
+
     upstream_result = await validate_upstream(upstream_url, upstream_key)
-    
+
     return {
         "webshare": webshare_results,
-        "upstream": upstream_result
+        "upstream": upstream_result,
     }
 
 
@@ -2934,7 +2949,7 @@ async def anthropic_messages(request: Request):
     stream = oai["stream"]
     headers = build_upstream_headers(request)
     timeout = 300.0 if stream else 120.0
-    status, resp_headers, body = await relay(oai, "chat/completions", stream, headers, timeout)
+    status, _resp_headers, body = await relay(oai, "chat/completions", stream, headers, timeout)
     if status >= 300:
         try:
             msg = json.loads(body).get("error", {}).get("message", "upstream error")

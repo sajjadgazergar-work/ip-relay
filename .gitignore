@@ -1,5 +1,28 @@
-```markdown
-# Documentation files
-TIER_IMPLEMENTATION_SUMMARY.md
-UI_IMPROVEMENTS.md
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
+.venv/
+venv/
+.env
+.env.local
+*.env.*
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Editors
+.vscode/
+.idea/
+
+# Build artifacts
+build/
+dist/
+target/
 ```
