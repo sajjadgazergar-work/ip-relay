@@ -106,8 +106,20 @@ def test_quota_backoff_grows_and_caps():
 def test_quota_ok_clears_backoff():
     ir._note_upstream_429()
     ir._note_quota_ok()
+    # v0.8.1: a single success halves the backoff; full reset needs the
+    # backoff to decay all the way to 30s (probe success) or a clean reset.
+    assert ir.QUOTA_STATE["exhausted"] is True        # still backing off
+    assert ir.QUOTA_STATE["backoff_sec"] == 90        # 180 // 2 (doubled to 180 first)
+    assert ir.QUOTA_STATE["backoff_until"] > 0.0
+
+
+def test_quota_ok_full_reset_after_decay():
+    ir._note_upstream_429()                            # 180
+    ir._note_quota_ok()                                # 90
+    ir._note_quota_ok()                                # 45
+    ir._note_quota_ok()                                # 30 -> exhausted False
     assert ir.QUOTA_STATE["exhausted"] is False
-    assert ir.QUOTA_STATE["backoff_sec"] == 90
+    assert ir.QUOTA_STATE["backoff_sec"] == 30
     assert ir.QUOTA_STATE["backoff_until"] == 0.0
 
 
@@ -124,11 +136,14 @@ def test_relay_success_clears_quota_flag(monkeypatch):
     monkeypatch.setattr(ir, "_attempt", fake_attempt)
     status, _, _ = asyncio.run(ir.relay({"model": "m"}, "chat/completions", False, {}, 30))
     assert status == 200
-    assert ir.QUOTA_STATE["exhausted"] is False
+    # one 200 halves 180 -> 90; the flag survives until decay completes
+    assert ir.QUOTA_STATE["exhausted"] is True
+    assert ir.QUOTA_STATE["backoff_sec"] == 90
 
 
-def test_quota_429_does_not_burn_the_lane(monkeypatch):
-    """A key-global 429 is not the lane's fault — it must stay warm."""
+def test_quota_429_burns_the_lane(monkeypatch):
+    """v0.8.1: a 429 from a lane means THAT lane's IP is burned — park it.
+    Escalates to key-global only when enough distinct lanes 429 together."""
     ln = ir.Lane("1.1.1.1:80", "http")
     ln.mark_ok(100)
     ir.POOL.lanes["http://1.1.1.1:80"] = ln
@@ -139,7 +154,34 @@ def test_quota_429_does_not_burn_the_lane(monkeypatch):
     monkeypatch.setattr(ir, "_attempt", fake_attempt)
     status, _, _ = asyncio.run(ir.relay({"model": "m"}, "chat/completions", False, {}, 30))
     assert status == 429
-    assert ln.parked_until == 0.0
+    assert ln.parked_until > 0.0          # lane parked (burned IP)
+    assert ir.QUOTA_STATE["exhausted"] is False   # not key-global yet (1 lane only)
+
+
+def test_quota_escalates_after_three_distinct_lanes():
+    """Three distinct lanes 429ing within the window = key-global quota."""
+    ir.QUOTA_STATE["_429_window"] = []
+    ir.QUOTA_STATE["_direct_429s"] = 0
+    ir.QUOTA_STATE["exhausted"] = False
+    ir.QUOTA_STATE["backoff_sec"] = 90
+    ir._note_lane_429("1.1.1.1:80")
+    ir._note_lane_429("2.2.2.2:80")
+    assert ir.QUOTA_STATE["exhausted"] is False        # 2 distinct: not yet
+    ir._note_lane_429("3.3.3.3:80")
+    assert ir.QUOTA_STATE["exhausted"] is True         # 3 distinct: key-global
+    assert ir.QUOTA_STATE["backoff_sec"] == 180
+
+
+def test_quota_escalates_after_three_direct_429s():
+    """The direct lane 429ing repeatedly = OUR key is dead, not a proxy."""
+    ir.QUOTA_STATE["_429_window"] = []
+    ir.QUOTA_STATE["_direct_429s"] = 0
+    ir.QUOTA_STATE["exhausted"] = False
+    ir.QUOTA_STATE["backoff_sec"] = 90
+    ir._note_lane_429("")     # direct
+    ir._note_lane_429("")     # direct
+    assert ir.QUOTA_STATE["exhausted"] is False
+    ir._note_lane_429("")     # direct
     assert ir.QUOTA_STATE["exhausted"] is True
 
 
@@ -762,6 +804,8 @@ def test_revalidate_burns_lane_on_failure(monkeypatch):
 # ══════════════════════════════════════════════════════════════════
 
 def test_probe_records_connect_error_class(monkeypatch):
+    """Stage-1 screen passes (proxy reachable); the full upstream post then
+    hits a real ConnectError — that is genuine link/NAT exhaustion."""
     class Dead:
         def __init__(self, *a, **k):
             pass
@@ -769,10 +813,39 @@ def test_probe_records_connect_error_class(monkeypatch):
             return self
         async def __aexit__(self, *a):
             return False
+        class _R:
+            status_code = 200
+            content = b"{}"
         async def get(self, *a, **k):
+            return self._R()                # screen succeeds
+        async def post(self, *a, **k):
             raise httpx.ConnectError("no route")
 
     monkeypatch.setattr(ir.httpx, "AsyncClient", Dead)
     out = asyncio.run(ir._probe_candidate("http://1.2.3.4:8080"))
     assert out is None
+    # v0.8.1: ConnectError = true link/NAT exhaustion -> "conn" (shrinks adaptive)
     assert ir._LAST_PROBE_ERR["http://1.2.3.4:8080"] == "conn"
+
+
+def test_probe_records_proxy_error_class(monkeypatch):
+    class BrokenProxy:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        class _R:
+            status_code = 200
+            content = b"{}"
+        async def get(self, *a, **k):
+            return self._R()                # screen succeeds
+        async def post(self, *a, **k):
+            raise httpx.ProxyError("tunnel failed")
+
+    monkeypatch.setattr(ir.httpx, "AsyncClient", BrokenProxy)
+    out = asyncio.run(ir._probe_candidate("http://1.2.3.4:8080"))
+    assert out is None
+    # v0.8.1: ProxyError = dead/rejecting proxy, NOT a link storm
+    assert ir._LAST_PROBE_ERR["http://1.2.3.4:8080"] == "proxy"

@@ -58,7 +58,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 # ── settings (env as base, settings.json overlays; UI writes the file) ──
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "settings.json")
@@ -77,7 +77,7 @@ DEFAULTS = {
     "relay_attempts": 6,              # lanes tried per client request (failover)
     "lane_cooldown_sec": 90,          # how long a burned lane is parked
     "lane_recover_sec": 240,          # parked lane re-probe interval
-    "direct_lane": False,             # include the server's own IP as a lane
+    "direct_lane": True,              # include the server's own IP as a lane (v0.8.1: on by default)
     "webshare_token": "",             # optional Webshare free-tier API token
     "allow_socks": True,              # use SOCKS4/5 sources (needs httpx[socks])
     # v0.8: capacity + safety
@@ -604,7 +604,40 @@ STATS = {"requests": 0, "failovers": 0, "lane_failures": 0,
 # 429s at once) — at that point probing is pure quota-burning, so the pool
 # manager pauses churn/recover with exponential backoff until the window
 # resets. A successful user relay clears the flag immediately.
-QUOTA_STATE = {"exhausted": False, "backoff_sec": 90, "backoff_until": 0.0, "announced": False}
+#
+# Important distinction (v0.8.1): most 429s in a public-proxy pool are PER-IP
+# (that specific egress IP is burned by upstream, or the proxy is shared with
+# thousands of other scrapers that already exhausted it). Only when enough
+# DISTINCT lanes 429 within a short window — or the direct lane 429s, which
+# proves the key itself is dead from our own egress — do we treat it as
+# key-global. Single per-IP 429s park that lane and keep probing.
+QUOTA_STATE = {"exhausted": False, "backoff_sec": 90, "backoff_until": 0.0, "announced": False,
+               "_429_window": [], "_direct_429s": 0}
+# key-global confidence: ≥3 distinct lanes 429ing within 45s, or ≥3 direct 429s
+QUOTA_LANE_THRESHOLD = 3
+QUOTA_WINDOW_SEC = 45
+
+
+def _note_lane_429(addr: str) -> None:
+    """Record a per-IP 429. Parks nothing globally; escalates to key-global
+    only when enough distinct lanes burn in a tight window."""
+    now = time.time()
+    w = QUOTA_STATE["_429_window"]
+    w.append((now, addr))
+    # keep only recent, distinct lanes
+    w[:] = [(t, a) for t, a in w if now - t <= QUOTA_WINDOW_SEC]
+    distinct = {a for _, a in w}
+    if addr == "":
+        QUOTA_STATE["_direct_429s"] += 1
+        if QUOTA_STATE["_direct_429s"] >= QUOTA_LANE_THRESHOLD:
+            _note_upstream_429()
+            QUOTA_STATE["_direct_429s"] = 0
+        return
+    if len(distinct) >= QUOTA_LANE_THRESHOLD:
+        log.info("quota: %d distinct lanes 429 in %ds — treating as key-global",
+                 len(distinct), QUOTA_WINDOW_SEC)
+        _note_upstream_429()
+        QUOTA_STATE["_429_window"] = []
 
 
 def _note_upstream_429() -> None:
@@ -617,12 +650,20 @@ def _note_upstream_429() -> None:
 
 
 def _note_quota_ok() -> None:
-    """A successful upstream call — quota is back, resume probing."""
+    """A successful upstream call — quota is back, resume probing.
+    v0.8.1: success decays the backoff instead of hard-resetting only on a
+    user relay, so a long-lived pool stops fighting a freed quota window."""
     if QUOTA_STATE["exhausted"]:
-        log.info("upstream quota recovered (200) — probing resumed")
-    QUOTA_STATE["exhausted"] = False
-    QUOTA_STATE["backoff_sec"] = 90
-    QUOTA_STATE["backoff_until"] = 0.0
+        QUOTA_STATE["backoff_sec"] = max(30, QUOTA_STATE["backoff_sec"] // 2)
+        if QUOTA_STATE["backoff_sec"] == 30:
+            log.info("upstream quota recovered (200) — probing resumed")
+            QUOTA_STATE["exhausted"] = False
+            QUOTA_STATE["backoff_until"] = 0.0
+        else:
+            QUOTA_STATE["backoff_until"] = min(QUOTA_STATE["backoff_until"],
+                                               time.time() + QUOTA_STATE["backoff_sec"])
+    if not QUOTA_STATE["exhausted"]:
+        QUOTA_STATE["backoff_until"] = 0.0
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -960,7 +1001,7 @@ async def _probe_candidate(key: str) -> Lane | None:
         # Stage 1: Fast connectivity screening (max 4 seconds)
         async with httpx.AsyncClient(proxy=proxy_url, timeout=4, verify=False) as c:
             if not await _screen(c):
-                _LAST_PROBE_ERR[key] = "conn"
+                _LAST_PROBE_ERR[key] = "proxy"   # proxy reached but screen failed
                 return None
 
         # Stage 2: Full upstream completions check
@@ -989,25 +1030,35 @@ async def _probe_candidate(key: str) -> Lane | None:
                     STATS["probes_ok"] += 1
                     return ln
                 elif r.status_code == 429 and is_quota_429(r.content, 429):
-                    # Key-global rate limit (FreeUsageLimitError): the IP is
-                    # fine — don't park it; flag quota state so the manager
-                    # pauses probing until the window resets.
-                    _note_upstream_429()
+                    # Per-IP rate limit (the proxy's egress IP is burned by the
+                    # upstream — shared public proxies are ALREADY exhausted by
+                    # other scrapers). Park THIS lane; keep probing the rest.
+                    # Only escalates to key-global when enough distinct lanes
+                    # 429 in a tight window (see _note_lane_429).
+                    _note_lane_429(addr)
                     STATS["probes_burned"] += 1
-                    log.info("Prober: Lane %s rate-limited (429) — key quota exhausted, probing paused", _display_addr(addr))
-                    return None
+                    log.info("Prober: Lane %s rate-limited (429) — parking, probing continues", _display_addr(addr))
+                    ln = Lane(addr, proto)
+                    ln.mark_fail(burn=True)
+                    ln.last_probe = time.time()
+                    return ln
                 else:
                     _LAST_PROBE_ERR[key] = "http"
                     log.warning("Prober: Lane %s failed Stage 2: HTTP %d (Response: %s)",
                                 _display_addr(addr), r.status_code, r.text[:100].strip())
         except Exception as e:
-            _LAST_PROBE_ERR[key] = "conn"
+            # Distinguish link/NAT exhaustion (ConnectError/ConnectTimeout — we
+            # cannot even reach the proxy host, the CPE table is full) from a
+            # dead/rejecting proxy (ProxyError/RemoteProtocolError/ReadError —
+            # the proxy exists but is broken). Only the former should shrink
+            # adaptive concurrency; the latter is just the nature of a free
+            # public list and must NOT count as a link storm.
+            _LAST_PROBE_ERR[key] = _classify_probe_error(e)
             log.warning("Prober: Lane %s failed Stage 2 connection: %s", _display_addr(addr), type(e).__name__)
     except Exception as e:
-        _LAST_PROBE_ERR[key] = "conn"
+        _LAST_PROBE_ERR[key] = _classify_probe_error(e)
         log.warning("Prober: Lane %s failed Stage 1 setup: %s", _display_addr(addr), type(e).__name__)
     return None
-
 
 async def _churn_batch() -> None:
     """Test a batch of candidates, promoting the good into the pool."""
@@ -1121,6 +1172,22 @@ def _key_subnet(key: str) -> str:
 _LAST_PROBE_ERR: dict[str, str] = {}
 
 
+def _classify_probe_error(e: Exception) -> str:
+    """Classify a probe exception for adaptive-concurrency purposes.
+
+    "conn"  — true link/NAT exhaustion (cannot reach the proxy host at all)
+    "proxy" — the proxy exists but is dead/broken/rejecting (free-list norm)
+    "http"  — upstream returned a non-2xx HTTP error
+    """
+    name = type(e).__name__
+    if name in ("ConnectError", "ConnectTimeout", "NetworkError"):
+        return "conn"
+    if name in ("ProxyError", "RemoteProtocolError", "ReadError", "ReadTimeout",
+                "WriteError", "WriteTimeout", "ProtocolError", "LocalProtocolError"):
+        return "proxy"
+    return "proxy"  # unknown exceptions from a public proxy are proxy noise too
+
+
 def _adapt_concurrency(conn_errors: int, completed: int) -> None:
     """Halve on a connect-error storm, grow 25% while the link is clean.
 
@@ -1176,8 +1243,8 @@ async def _recover_parked() -> None:
                     )
                     ln.last_probe = now
                     if r.status_code == 429 and is_quota_429(r.content, 429):
-                        _note_upstream_429()
-                        return  # key quota, not the lane — keep its parked state, don't re-burn
+                        _note_lane_429(ln.addr)
+                        return  # this lane's IP is burned; keep parked, don't re-burn
                     if r.status_code == 200 and _looks_like_completion(r.content):
                         _note_quota_ok()
                         ln.mark_ok((time.time() - t0) * 1000)
@@ -1424,12 +1491,15 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                                     "ms": round(ms), "attempt": i + 1, "tier": lane.tier})
                 return status, resp_headers, body
             if status == 429 and is_quota_429(body, 429):
-                # key-global rate limit — don't burn the lane; fail over, and
-                # fail fast (2 attempts max) once the key is known-exhausted.
-                _note_upstream_429()
+                # Per-IP rate limit — park the lane, fail over. Escalates to
+                # key-global only when enough distinct lanes 429 (see
+                # _note_lane_429). Fail fast (2 attempts max) once the key
+                # is known-exhausted.
+                lane.mark_fail(burn=True)
+                _note_lane_429(lane.addr)
                 STATS["failovers"] += 1
                 last_err = (429, body)
-                if i >= 1 or time.time() > deadline:
+                if i >= 1 or time.time() > deadline or QUOTA_STATE["exhausted"]:
                     break
                 continue
             # invalid-body 502 from a burned lane: fail over, don't surface
@@ -1599,12 +1669,13 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                     break
                 continue
             if status == 429 and is_quota_429(await resp.aread(), 429):
-                _note_upstream_429()
+                lane.mark_fail(burn=True)
+                _note_lane_429(lane.addr)
                 STATS["failovers"] += 1
                 last_err = (429, b"")
                 await resp.aclose()
                 await client.aclose()
-                if i >= 1 or time.time() > deadline:
+                if i >= 1 or time.time() > deadline or QUOTA_STATE["exhausted"]:
                     break
                 continue
             # other 4xx (400/401/403): surface immediately, not a proxy problem
