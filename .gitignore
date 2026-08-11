@@ -1,11 +1,28 @@
+```
+# Python
 __pycache__/
 *.pyc
-.venv/
-.env
-*.sqlite
+*.pyo
+*.pyd
 
-# Local state — contains credentials. settings.json holds the upstream and
-# Webshare API keys; lanes.json holds proxy URLs including user:pass userinfo.
-settings.json
-lanes.json
-lanes.json.tmp
+# Environment
+.venv/
+venv/
+.env
+.env.local
+*.env.*
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Editors
+.vscode/
+.idea/
+
+# Build artifacts
+build/
+dist/
+target/
+```
