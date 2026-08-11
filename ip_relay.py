@@ -195,7 +195,7 @@ def load_settings() -> None:
         "persist_lanes": os.environ.get("PERSIST_LANES", "1") in ("1", "true", "yes"),
     }
     try:
-        with open(SETTINGS_FILE) as f:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
             s.update({k: v for k, v in json.load(f).items() if k in DEFAULTS})
     except Exception:
         pass
@@ -217,7 +217,7 @@ def load_settings() -> None:
 
 def save_settings() -> None:
     try:
-        with open(SETTINGS_FILE, "w") as f:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2)
     except Exception as e:
         log.warning("could not save settings: %s", e)
@@ -753,7 +753,7 @@ def save_lanes() -> int:
     keep = [ln.to_dict() for ln in POOL.lanes.values() if ln.addr and ln.score > 0.25]
     try:
         tmp = LANES_FILE + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"saved": time.time(), "lanes": keep}, f)
         os.replace(tmp, LANES_FILE)   # atomic: never leave a torn file behind
         return len(keep)
@@ -768,7 +768,7 @@ def load_lanes() -> int:
     if not PERSIST_LANES:
         return 0
     try:
-        with open(LANES_FILE) as f:
+        with open(LANES_FILE, encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         return 0

@@ -7,34 +7,51 @@ echo =========================================================
 echo  ip-relay // egress rotator launcher
 echo =========================================================
 
+rem Always surface the real error — never let the window vanish silently.
+set "ERR=0"
+
+rem ---- 1. Check Python / venv ----
 if not exist ".venv\Scripts\python.exe" (
-    echo [!] Python virtual environment (.venv) not found.
-    echo     Initializing virtual environment and installing dependencies...
+    echo [!] Virtual environment (.venv) not found in: %~dp0
+    echo     Trying to create it...
     echo.
-    
     python -m venv .venv 2>nul
     if errorlevel 1 (
         py -3 -m venv .venv 2>nul
         if errorlevel 1 (
-            echo [ERROR] Python 3 was not found on your system!
-            echo Please install Python 3 from https://python.org and make sure
-            echo "Add Python to PATH" is checked during installation.
+            echo.
+            echo [ERROR] Python 3 was not found on your system.
+            echo   Install Python 3 from https://python.org and CHECK "Add Python to PATH".
+            echo   Then re-run this file.
             echo.
             pause
             exit /b 1
         )
     )
-    
-    echo [i] Installing required packages...
+    echo [i] Installing dependencies...
     ".venv\Scripts\python.exe" -m pip install --upgrade pip -q
+    if errorlevel 1 ( set "ERR=1" )
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
-    if errorlevel 1 (
-        echo [ERROR] Failed to install dependencies from requirements.txt!
+    if errorlevel 1 ( set "ERR=1" )
+    if "!ERR!"=="1" (
+        echo.
+        echo [ERROR] Failed to install dependencies.
+        echo   Check your internet connection, then re-run this file.
         pause
         exit /b 1
     )
-    echo [OK] Setup completed successfully!
+    echo [OK] Setup complete.
     echo.
+)
+
+rem ---- 2. Verify the venv python actually runs ----
+".venv\Scripts\python.exe" -c "import sys; sys.exit(0)" >nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo [ERROR] The .venv Python is broken (cannot execute).
+    echo   Delete the ".venv" folder and re-run this file to rebuild it.
+    pause
+    exit /b 1
 )
 
 echo Starting ip-relay server on http://localhost:18080 ...
@@ -45,7 +62,10 @@ echo.
 
 if errorlevel 1 (
     echo.
-    echo [ERROR] ip-relay stopped unexpectedly (Exit code: %errorlevel%).
-    echo If port 18080 is in use, stop the conflicting service and try again.
+    echo [ERROR] ip-relay stopped with code %errorlevel%.
+    echo   - If you see "address already in use": another server is on port 18080.
+    echo     Close it, or edit --port in this file.
+    echo   - If you see a Python traceback above, copy it and report it.
+    echo.
     pause
 )

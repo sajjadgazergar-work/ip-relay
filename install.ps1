@@ -96,14 +96,29 @@ if ($Manual) {
   Log 'Creating one-click launcher ...'
   $bat = @"
 @echo off
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
-  echo [ERROR] Virtual environment (.venv) not found. Run install.ps1 to setup.
+  echo [ERROR] Virtual environment (.venv) not found.
+  echo   Run install.ps1 again, or delete ".venv" and re-run this file.
   pause
   exit /b 1
 )
+".venv\Scripts\python.exe" -c "import sys; sys.exit(0)" >nul 2>nul
+if errorlevel 1 (
+  echo [ERROR] The .venv Python is broken. Delete ".venv" and re-run.
+  pause
+  exit /b 1
+)
+echo Starting ip-relay on http://localhost:18080 ...
 ".venv\Scripts\python.exe" -m uvicorn ip_relay:app --host 0.0.0.0 --port 18080
-if errorlevel 1 pause
+if errorlevel 1 (
+  echo.
+  echo [ERROR] ip-relay stopped with code %errorlevel%.
+  echo   If you see "address already in use": close the other server on 18080.
+  echo   Otherwise copy the traceback above and report it.
+  pause
+)
 "@
   Set-Content -Path "$Dir\start-ip-relay.bat" -Value $bat -Encoding ASCII
   Log "Launcher: $Dir\start-ip-relay.bat (double-click to run)"
