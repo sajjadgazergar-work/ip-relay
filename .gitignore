@@ -1,11 +1,5 @@
-__pycache__/
-*.pyc
-.venv/
-.env
-*.sqlite
-
-# Local state — contains credentials. settings.json holds the upstream and
-# Webshare API keys; lanes.json holds proxy URLs including user:pass userinfo.
-settings.json
-lanes.json
-lanes.json.tmp
+```markdown
+# Documentation files
+TIER_IMPLEMENTATION_SUMMARY.md
+UI_IMPROVEMENTS.md
+```

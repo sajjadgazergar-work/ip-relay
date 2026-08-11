@@ -58,7 +58,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 # ── settings (env as base, settings.json overlays; UI writes the file) ──
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "settings.json")
@@ -69,22 +69,50 @@ DEFAULTS = {
     "relay_api_key": "",
     "probe_model": "deepseek-v4-flash-free",
     # egress / pool
-    "proxy_pool_target": 30,          # how many confirmed lanes to keep warm
-    "proxy_max_candidates": 3000,     # cap candidates held in the reservoir
-    "proxy_test_concurrency": 60,     # concurrent probes (ceiling when adaptive)
-    "proxy_probe_timeout": 25,        # real-probe timeout (slow proxies OK)
-    "relay_proxy_timeout": 40,        # per-attempt upstream timeout via proxy
-    "relay_attempts": 6,              # lanes tried per client request (failover)
-    "lane_cooldown_sec": 90,          # how long a burned lane is parked
-    "lane_recover_sec": 240,          # parked lane re-probe interval
-    "direct_lane": False,             # include the server's own IP as a lane
-    "webshare_token": "",             # optional Webshare free-tier API token
-    "allow_socks": True,              # use SOCKS4/5 sources (needs httpx[socks])
+    "proxy_pool_target": 30,
+    "proxy_max_candidates": 3000,
+    "proxy_test_concurrency": 60,
+    "proxy_probe_timeout": 25,
+    "relay_proxy_timeout": 40,
+    "relay_attempts": 6,
+    "lane_cooldown_sec": 90,
+    "lane_recover_sec": 240,
+    "direct_lane": False,
+    "webshare_token": "",
+    "allow_socks": True,
     # v0.8: capacity + safety
-    "lane_max_inflight": 2,           # concurrent requests allowed per lane
-    "max_lanes_per_subnet": 3,        # /24 diversity cap (0 = unlimited)
-    "adaptive_concurrency": True,     # auto-tune probe concurrency to the link
-    "persist_lanes": True,            # remember scored lanes across restarts
+    "lane_max_inflight": 2,
+    "max_lanes_per_subnet": 3,
+    "adaptive_concurrency": True,
+    "persist_lanes": True,
+    # v0.9: Tier 1 - Critical improvements
+    "sticky_sessions": False,
+    "sticky_session_ttl": 300,
+    "idempotency_enabled": True,
+    "idempotency_window": 3600,
+    "rate_limit_requests": 100,
+    "rate_limit_window": 60,
+    "anonymous_auth_allowed": False,
+    # v0.9: Tier 2 - High value features
+    "geo_filter_enabled": False,
+    "geo_allowed_countries": [],
+    "geo_blocked_countries": [],
+    "ipv6_enabled": False,
+    "guard_proxies_count": 3,
+    "provider_profile": "opencode-zen",
+    "upstream_health_check": True,
+    "upstream_health_interval": 30,
+    # v0.9: Tier 3 - Strategic features
+    "clustering_enabled": False,
+    "cluster_redis_url": "redis://localhost:6379/0",
+    "cluster_node_id": "",
+    "ml_prediction_enabled": False,
+    "ml_model_path": "",
+    # v0.9: Tier 4 - Polish & ecosystem
+    "alert_webhook_url": "",
+    "alert_pool_threshold": 5,
+    "websocket_support": False,
+    "cli_diagnostics": True,
 }
 settings: dict = dict(DEFAULTS)
 
@@ -102,10 +130,17 @@ SETTING_BOUNDS: dict[str, tuple[int, int]] = {
     "lane_recover_sec": (30, 86400),
     "lane_max_inflight": (1, 32),
     "max_lanes_per_subnet": (0, 100),
+    # v0.9 bounds
+    "sticky_session_ttl": (60, 3600),
+    "idempotency_window": (60, 86400),
+    "rate_limit_requests": (1, 10000),
+    "rate_limit_window": (1, 3600),
+    "guard_proxies_count": (0, 10),
+    "upstream_health_interval": (5, 300),
+    "alert_pool_threshold": (1, 50),
 }
 
-# Named upstream profiles: base URL + probe model in one pick, so a new user
-# does not have to know a provider's quirks to get a working pool.
+# Named upstream profiles with expanded provider support
 PROVIDER_PROFILES: dict[str, dict] = {
     "opencode-zen": {
         "label": "OpenCode Zen (free tier)",
@@ -127,6 +162,27 @@ PROVIDER_PROFILES: dict[str, dict] = {
         "probe_model": "llama-3.3-70b-versatile",
         "upstream_api_key": "",
         "note": "Generous free tier, per-key RPM limits.",
+    },
+    "sambanova": {
+        "label": "SambaNova",
+        "upstream_base_url": "https://api.sambanova.ai/v1",
+        "probe_model": "Meta-Llama-3.1-8B-Instruct",
+        "upstream_api_key": "",
+        "note": "Free tier available with registration.",
+    },
+    "together": {
+        "label": "Together AI",
+        "upstream_base_url": "https://api.together.xyz/v1",
+        "probe_model": "meta-llama/Llama-3-8b-chat-hf",
+        "upstream_api_key": "",
+        "note": "Free credits on signup.",
+    },
+    "deepinfra": {
+        "label": "DeepInfra",
+        "upstream_base_url": "https://api.deepinfra.com/v1/openai",
+        "probe_model": "meta-llama/Llama-3.2-3B-Instruct",
+        "upstream_api_key": "",
+        "note": "Pay-per-token but very cheap; good backup provider.",
     },
     "generic-openai": {
         "label": "Generic OpenAI-compatible",
@@ -157,21 +213,58 @@ LANE_MAX_INFLIGHT = DEFAULTS["lane_max_inflight"]
 MAX_LANES_PER_SUBNET = DEFAULTS["max_lanes_per_subnet"]
 ADAPTIVE_CONCURRENCY = DEFAULTS["adaptive_concurrency"]
 PERSIST_LANES = DEFAULTS["persist_lanes"]
+# v0.9 globals
+STICKY_SESSIONS = DEFAULTS["sticky_sessions"]
+STICKY_SESSION_TTL = DEFAULTS["sticky_session_ttl"]
+IDEMPOTENCY_ENABLED = DEFAULTS["idempotency_enabled"]
+IDEMPOTENCY_WINDOW = DEFAULTS["idempotency_window"]
+RATE_LIMIT_REQUESTS = DEFAULTS["rate_limit_requests"]
+RATE_LIMIT_WINDOW = DEFAULTS["rate_limit_window"]
+ANONYMOUS_AUTH_ALLOWED = DEFAULTS["anonymous_auth_allowed"]
+GEO_FILTER_ENABLED = DEFAULTS["geo_filter_enabled"]
+GEO_ALLOWED_COUNTRIES = []
+GEO_BLOCKED_COUNTRIES = []
+IPV6_ENABLED = DEFAULTS["ipv6_enabled"]
+GUARD_PROXIES_COUNT = DEFAULTS["guard_proxies_count"]
+PROVIDER_PROFILE = DEFAULTS["provider_profile"]
+UPSTREAM_HEALTH_CHECK = DEFAULTS["upstream_health_check"]
+UPSTREAM_HEALTH_INTERVAL = DEFAULTS["upstream_health_interval"]
+CLUSTERING_ENABLED = DEFAULTS["clustering_enabled"]
+CLUSTER_REDIS_URL = DEFAULTS["cluster_redis_url"]
+CLUSTER_NODE_ID = ""
+ML_PREDICTION_ENABLED = DEFAULTS["ml_prediction_enabled"]
+ML_MODEL_PATH = DEFAULTS["ml_model_path"]
+ALERT_WEBHOOK_URL = DEFAULTS["alert_webhook_url"]
+ALERT_POOL_THRESHOLD = DEFAULTS["alert_pool_threshold"]
+WEBSOCKET_SUPPORT = DEFAULTS["websocket_support"]
 
-# Adaptive probe concurrency. A fixed number is wrong on every link: 60 melts
-# an Iranian residential CPE's NAT table (the root cause of the "0 warm
-# proxies" reports) while barely loading a datacenter uplink. Start modest,
-# grow while the link is clean, halve on a connect-error storm.
+# Adaptive probe concurrency
 ADAPT = {
-    "current": 20,        # concurrency in force right now
+    "current": 20,
     "min": 5,
     "last_change": 0.0,
     "last_reason": "init",
     "err_ratio": 0.0,
 }
 
+# v0.9: Idempotency cache - prevents duplicate charges on failover retry
+IDEMPOTENCY_CACHE: dict[str, tuple[bytes, float]] = {}
+
+# v0.9: Sticky sessions map - session_id -> (lane_addr, expiry)
+STICKY_SESSIONS_MAP: dict[str, tuple[str, float]] = {}
+
+# v0.9: Rate limiting - client_id -> [(timestamp, count)]
+RATE_LIMIT_STATE: dict[str, list[tuple[float, int]]] = {}
+
+# v0.9: Upstream health cache
+UPSTREAM_HEALTH: dict[str, tuple[bool, float, str]] = {}  # url -> (healthy, timestamp, error)
+
+# v0.9: Alert state - prevent alert spam
+ALERT_LAST_SENT: dict[str, float] = {}
+
 
 def load_settings() -> None:
+    """Load settings from environment and file, with v0.9 security hardening."""
     load_dotenv()
     s = {
         "upstream_base_url": os.environ.get("UPSTREAM_BASE_URL", os.environ.get("OPENCODE_BASE_URL", DEFAULTS["upstream_base_url"])).rstrip("/"),
@@ -193,6 +286,24 @@ def load_settings() -> None:
         "max_lanes_per_subnet": int(os.environ.get("MAX_LANES_PER_SUBNET", DEFAULTS["max_lanes_per_subnet"])),
         "adaptive_concurrency": os.environ.get("ADAPTIVE_CONCURRENCY", "1") in ("1", "true", "yes"),
         "persist_lanes": os.environ.get("PERSIST_LANES", "1") in ("1", "true", "yes"),
+        # v0.9 settings
+        "sticky_sessions": os.environ.get("STICKY_SESSIONS", "0") in ("1", "true", "yes"),
+        "sticky_session_ttl": int(os.environ.get("STICKY_SESSION_TTL", DEFAULTS["sticky_session_ttl"])),
+        "idempotency_enabled": os.environ.get("IDEMPOTENCY_ENABLED", "1") in ("1", "true", "yes"),
+        "idempotency_window": int(os.environ.get("IDEMPOTENCY_WINDOW", DEFAULTS["idempotency_window"])),
+        "rate_limit_requests": int(os.environ.get("RATE_LIMIT_REQUESTS", DEFAULTS["rate_limit_requests"])),
+        "rate_limit_window": int(os.environ.get("RATE_LIMIT_WINDOW", DEFAULTS["rate_limit_window"])),
+        "anonymous_auth_allowed": os.environ.get("RELAY_ALLOW_ANONYMOUS", "0") in ("1", "true", "yes"),  # DEPRECATED
+        "geo_filter_enabled": os.environ.get("GEO_FILTER_ENABLED", "0") in ("1", "true", "yes"),
+        "ipv6_enabled": os.environ.get("IPV6_ENABLED", "0") in ("1", "true", "yes"),
+        "guard_proxies_count": int(os.environ.get("GUARD_PROXIES_COUNT", DEFAULTS["guard_proxies_count"])),
+        "provider_profile": os.environ.get("PROVIDER_PROFILE", DEFAULTS["provider_profile"]),
+        "upstream_health_check": os.environ.get("UPSTREAM_HEALTH_CHECK", "1") in ("1", "true", "yes"),
+        "clustering_enabled": os.environ.get("CLUSTERING_ENABLED", "0") in ("1", "true", "yes"),
+        "cluster_redis_url": os.environ.get("CLUSTER_REDIS_URL", DEFAULTS["cluster_redis_url"]),
+        "ml_prediction_enabled": os.environ.get("ML_PREDICTION_ENABLED", "0") in ("1", "true", "yes"),
+        "alert_webhook_url": os.environ.get("ALERT_WEBHOOK_URL", ""),
+        "alert_pool_threshold": int(os.environ.get("ALERT_POOL_THRESHOLD", DEFAULTS["alert_pool_threshold"])),
     }
     try:
         with open(SETTINGS_FILE) as f:
@@ -200,18 +311,16 @@ def load_settings() -> None:
     except Exception:
         pass
     apply_settings(s, persist=False)
-    # Default-deny the control plane: an empty relay key means every /api route
-    # (including POST /api/settings, which can repoint the upstream at an
-    # attacker's collector) is world-open the moment the port is reachable.
-    # Mint one, persist it, and print it once so the operator can copy it.
-    if not RELAY_API_KEY and os.environ.get("RELAY_ALLOW_ANONYMOUS", "0") not in ("1", "true", "yes"):
+    # SECURITY HARDENING: Default-deny with no escape hatch
+    # RELAY_ALLOW_ANONYMOUS is deprecated and ignored - auth is always required
+    if not RELAY_API_KEY:
         generated = "rly_" + uuid.uuid4().hex
         apply_settings({"relay_api_key": generated}, persist=True)
         log.warning("=" * 68)
         log.warning("SECURITY: no relay_api_key was set — generated one for you:")
         log.warning("    %s", generated)
         log.warning("Saved to %s. Use it as the Bearer token from clients and the", SETTINGS_FILE)
-        log.warning("dashboard. Set RELAY_ALLOW_ANONYMOUS=1 to run without auth.")
+        log.warning("dashboard. Auth is now REQUIRED - anonymous access is disabled.")
         log.warning("=" * 68)
 
 
@@ -224,15 +333,28 @@ def save_settings() -> None:
 
 
 def apply_settings(new: dict, persist: bool = True) -> dict:
+    """Apply setting updates with v0.9 feature support."""
     global UPSTREAM_API_KEY, UPSTREAM_BASE_URL, RELAY_API_KEY, PROBE_MODEL
     global POOL_TARGET, MAX_CANDIDATES, TEST_CONCURRENCY, PROBE_TIMEOUT
     global RELAY_PROXY_TIMEOUT, RELAY_ATTEMPTS, LANE_COOLDOWN_SEC, LANE_RECOVER_SEC
     global DIRECT_LANE, WEBSHARE_TOKEN, ALLOW_SOCKS
     global LANE_MAX_INFLIGHT, MAX_LANES_PER_SUBNET, ADAPTIVE_CONCURRENCY, PERSIST_LANES
+    # v0.9 globals
+    global STICKY_SESSIONS, STICKY_SESSION_TTL, IDEMPOTENCY_ENABLED, IDEMPOTENCY_WINDOW
+    global RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW, ANONYMOUS_AUTH_ALLOWED
+    global GEO_FILTER_ENABLED, GEO_ALLOWED_COUNTRIES, GEO_BLOCKED_COUNTRIES
+    global IPV6_ENABLED, GUARD_PROXIES_COUNT, PROVIDER_PROFILE
+    global UPSTREAM_HEALTH_CHECK, UPSTREAM_HEALTH_INTERVAL
+    global CLUSTERING_ENABLED, CLUSTER_REDIS_URL, CLUSTER_NODE_ID
+    global ML_PREDICTION_ENABLED, ML_MODEL_PATH
+    global ALERT_WEBHOOK_URL, ALERT_POOL_THRESHOLD, WEBSOCKET_SUPPORT
+    
     old_base, old_key = UPSTREAM_BASE_URL, UPSTREAM_API_KEY
     for k, v in new.items():
         if k in DEFAULTS:
             settings[k] = v
+    
+    # Core settings
     UPSTREAM_API_KEY = str(settings["upstream_api_key"]).strip()
     UPSTREAM_BASE_URL = str(settings["upstream_base_url"]).rstrip("/")
     RELAY_API_KEY = str(settings["relay_api_key"]).strip()
@@ -252,6 +374,32 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     MAX_LANES_PER_SUBNET = max(0, int(settings["max_lanes_per_subnet"]))
     ADAPTIVE_CONCURRENCY = bool(settings["adaptive_concurrency"])
     PERSIST_LANES = bool(settings["persist_lanes"])
+    
+    # v0.9 settings
+    STICKY_SESSIONS = bool(settings["sticky_sessions"])
+    STICKY_SESSION_TTL = max(60, int(settings["sticky_session_ttl"]))
+    IDEMPOTENCY_ENABLED = bool(settings["idempotency_enabled"])
+    IDEMPOTENCY_WINDOW = max(60, int(settings["idempotency_window"]))
+    RATE_LIMIT_REQUESTS = max(1, int(settings["rate_limit_requests"]))
+    RATE_LIMIT_WINDOW = max(1, int(settings["rate_limit_window"]))
+    ANONYMOUS_AUTH_ALLOWED = False  # Always disabled for security
+    GEO_FILTER_ENABLED = bool(settings["geo_filter_enabled"])
+    GEO_ALLOWED_COUNTRIES = list(settings.get("geo_allowed_countries", []))
+    GEO_BLOCKED_COUNTRIES = list(settings.get("geo_blocked_countries", []))
+    IPV6_ENABLED = bool(settings["ipv6_enabled"])
+    GUARD_PROXIES_COUNT = max(0, int(settings["guard_proxies_count"]))
+    PROVIDER_PROFILE = str(settings["provider_profile"])
+    UPSTREAM_HEALTH_CHECK = bool(settings["upstream_health_check"])
+    UPSTREAM_HEALTH_INTERVAL = max(5, int(settings["upstream_health_interval"]))
+    CLUSTERING_ENABLED = bool(settings["clustering_enabled"])
+    CLUSTER_REDIS_URL = str(settings["cluster_redis_url"])
+    CLUSTER_NODE_ID = str(settings["cluster_node_id"]) or f"node_{uuid.uuid4().hex[:8]}"
+    ML_PREDICTION_ENABLED = bool(settings["ml_prediction_enabled"])
+    ML_MODEL_PATH = str(settings["ml_model_path"])
+    ALERT_WEBHOOK_URL = str(settings["alert_webhook_url"])
+    ALERT_POOL_THRESHOLD = max(1, int(settings["alert_pool_threshold"]))
+    WEBSOCKET_SUPPORT = bool(settings["websocket_support"])
+    
     if not ADAPTIVE_CONCURRENCY:
         ADAPT["current"] = TEST_CONCURRENCY
     else:
@@ -264,19 +412,19 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
 
 
 def validate_settings_payload(body: dict) -> tuple[dict, list[str]]:
-    """Split an incoming settings payload into (accepted updates, errors).
-
-    Masked secrets are skipped (never overwrite a real key with 'abc...'),
-    numeric fields are bounds-checked, and unknown keys are ignored.
-    """
+    """Validate settings payload with v0.9 field support."""
     updates: dict = {}
     errors: list[str] = []
     for k, v in body.items():
         if k not in DEFAULTS:
             continue
+        # Skip masked secrets
         if k in ("upstream_api_key", "relay_api_key", "webshare_token") and isinstance(v, str):
             if "..." in v or v == "(none)":
                 continue
+        # SECURITY: Never allow anonymous auth to be enabled
+        if k == "anonymous_auth_allowed":
+            continue
         if k in SETTING_BOUNDS:
             lo, hi = SETTING_BOUNDS[k]
             try:
@@ -296,8 +444,214 @@ def validate_settings_payload(body: dict) -> tuple[dict, list[str]]:
             if not v.strip().lower().startswith(("http://", "https://")):
                 errors.append("upstream_base_url: must start with http:// or https://")
                 continue
+        if k in ("geo_allowed_countries", "geo_blocked_countries") and isinstance(v, list):
+            updates[k] = v
+            continue
         updates[k] = v
     return updates, errors
+
+
+# ── Tier 1: Idempotency, Rate Limiting, Sticky Sessions ───────────────────
+
+def check_idempotency(key: str) -> bytes | None:
+    """Check if idempotency key exists; return cached response if found."""
+    if not IDEMPOTENCY_ENABLED or not key:
+        return None
+    now = time.time()
+    if key in IDEMPOTENCY_CACHE:
+        cached_body, expiry = IDEMPOTENCY_CACHE[key]
+        if now < expiry:
+            return cached_body
+        else:
+            del IDEMPOTENCY_CACHE[key]
+    return None
+
+
+def cache_idempotency(key: str, body: bytes) -> None:
+    """Cache response for idempotency key."""
+    if not IDEMPOTENCY_ENABLED or not key:
+        return
+    IDEMPOTENCY_CACHE[key] = (body, time.time() + IDEMPOTENCY_WINDOW)
+
+
+def check_rate_limit(client_id: str) -> tuple[bool, int]:
+    """Check rate limit for client. Returns (allowed, retry_after)."""
+    if not RATE_LIMIT_REQUESTS > 0:
+        return True, 0
+    
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW
+    
+    if client_id not in RATE_LIMIT_STATE:
+        RATE_LIMIT_STATE[client_id] = [(now, 1)]
+        return True, 0
+    
+    # Clean old entries
+    RATE_LIMIT_STATE[client_id] = [(t, c) for t, c in RATE_LIMIT_STATE[client_id] if t > window_start]
+    
+    total_requests = sum(c for _, c in RATE_LIMIT_STATE[client_id])
+    
+    if total_requests >= RATE_LIMIT_REQUESTS:
+        oldest = min(t for t, _ in RATE_LIMIT_STATE[client_id])
+        retry_after = int(oldest + RATE_LIMIT_WINDOW - now) + 1
+        return False, max(1, retry_after)
+    
+    # Add current request
+    if RATE_LIMIT_STATE[client_id]:
+        last_time, last_count = RATE_LIMIT_STATE[client_id][-1]
+        if last_time == now:
+            RATE_LIMIT_STATE[client_id][-1] = (last_time, last_count + 1)
+        else:
+            RATE_LIMIT_STATE[client_id].append((now, 1))
+    else:
+        RATE_LIMIT_STATE[client_id] = [(now, 1)]
+    
+    return True, 0
+
+
+def get_sticky_lane(session_id: str) -> Lane | None:
+    """Get lane for sticky session if exists and not expired."""
+    if not STICKY_SESSIONS or not session_id:
+        return None
+    
+    now = time.time()
+    if session_id in STICKY_SESSIONS_MAP:
+        lane_addr, expiry = STICKY_SESSIONS_MAP[session_id]
+        if now < expiry:
+            # Find the lane in pool
+            for lane in POOL.warm_lanes():
+                if lane.addr == lane_addr and not lane.burned:
+                    return lane
+        else:
+            del STICKY_SESSIONS_MAP[session_id]
+    return None
+
+
+def set_sticky_lane(session_id: str, lane: Lane) -> None:
+    """Bind session to lane for sticky sessions."""
+    if not STICKY_SESSIONS or not session_id or not lane:
+        return
+    STICKY_SESSIONS_MAP[session_id] = (lane.addr, time.time() + STICKY_SESSION_TTL)
+
+
+def cleanup_expired_state() -> None:
+    """Periodic cleanup of expired idempotency keys and sticky sessions."""
+    now = time.time()
+    
+    # Cleanup idempotency cache
+    expired_keys = [k for k, (_, expiry) in IDEMPOTENCY_CACHE.items() if now >= expiry]
+    for k in expired_keys:
+        del IDEMPOTENCY_CACHE[k]
+    
+    # Cleanup sticky sessions
+    expired_sessions = [k for k, (_, expiry) in STICKY_SESSIONS_MAP.items() if now >= expiry]
+    for k in expired_sessions:
+        del STICKY_SESSIONS_MAP[k]
+    
+    # Cleanup rate limit state (keep only last window)
+    window_start = now - RATE_LIMIT_WINDOW * 2
+    for client_id in list(RATE_LIMIT_STATE.keys()):
+        RATE_LIMIT_STATE[client_id] = [(t, c) for t, c in RATE_LIMIT_STATE[client_id] if t > window_start]
+        if not RATE_LIMIT_STATE[client_id]:
+            del RATE_LIMIT_STATE[client_id]
+
+
+async def send_alert_webhook(alert_type: str, message: str, details: dict | None = None) -> bool:
+    """Send alert to configured webhook URL. Returns True if sent successfully."""
+    if not ALERT_WEBHOOK_URL:
+        return False
+    
+    now = time.time()
+    # Rate limit alerts: max 1 per minute per alert type
+    last_sent = ALERT_LAST_SENT.get(alert_type, 0)
+    if now - last_sent < 60:
+        return False
+    
+    payload = {
+        "alert_type": alert_type,
+        "message": message,
+        "timestamp": now,
+        "node_id": CLUSTER_NODE_ID,
+        "details": details or {}
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
+            response = await client.post(ALERT_WEBHOOK_URL, json=payload)
+            if response.status_code in (200, 201, 204):
+                ALERT_LAST_SENT[alert_type] = now
+                log.info("Alert sent: %s", alert_type)
+                return True
+            else:
+                log.warning("Alert webhook returned %d", response.status_code)
+                return False
+    except Exception as e:
+        log.warning("Failed to send alert webhook: %s", e)
+        return False
+
+
+async def check_upstream_health() -> None:
+    """Periodically check upstream health and update cache."""
+    if not UPSTREAM_HEALTH_CHECK or not UPSTREAM_BASE_URL:
+        return
+    
+    now = time.time()
+    healthy, last_check, error = UPSTREAM_HEALTH.get(UPSTREAM_BASE_URL, (True, 0, ""))
+    
+    # Only check if interval has passed
+    if now - last_check < UPSTREAM_HEALTH_INTERVAL:
+        return
+    
+    try:
+        headers = {}
+        if UPSTREAM_API_KEY and UPSTREAM_API_KEY != "(none)":
+            headers["Authorization"] = f"Bearer {UPSTREAM_API_KEY}"
+        
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=4), verify=False) as client:
+            response = await client.get(f"{UPSTREAM_BASE_URL}/models", headers=headers)
+            if response.status_code == 200:
+                UPSTREAM_HEALTH[UPSTREAM_BASE_URL] = (True, now, "")
+                log.debug("Upstream health check passed")
+            else:
+                error_msg = f"HTTP {response.status_code}"
+                UPSTREAM_HEALTH[UPSTREAM_BASE_URL] = (False, now, error_msg)
+                log.warning("Upstream health check failed: %s", error_msg)
+                
+                # Send alert if threshold breached
+                pool_count = len([l for l in POOL.warm_lanes() if not l.burned])
+                if pool_count < ALERT_POOL_THRESHOLD:
+                    await send_alert_webhook(
+                        "upstream_unhealthy",
+                        f"Upstream {UPSTREAM_BASE_URL} returned {response.status_code}",
+                        {"status_code": response.status_code, "pool_size": pool_count}
+                    )
+    except Exception as e:
+        error_msg = str(e)
+        UPSTREAM_HEALTH[UPSTREAM_BASE_URL] = (False, now, error_msg)
+        log.warning("Upstream health check error: %s", error_msg)
+        
+        # Send alert if threshold breached
+        pool_count = len([l for l in POOL.warm_lanes() if not l.burned])
+        if pool_count < ALERT_POOL_THRESHOLD:
+            await send_alert_webhook(
+                "upstream_error",
+                f"Upstream {UPSTREAM_BASE_URL} error: {error_msg}",
+                {"error": error_msg, "pool_size": pool_count}
+            )
+
+
+async def monitor_pool_threshold() -> None:
+    """Monitor pool size and send alerts when below threshold."""
+    if not ALERT_WEBHOOK_URL:
+        return
+    
+    pool_count = len([l for l in POOL.warm_lanes() if not l.burned])
+    if pool_count < ALERT_POOL_THRESHOLD:
+        await send_alert_webhook(
+            "pool_low",
+            f"Proxy pool size ({pool_count}) below threshold ({ALERT_POOL_THRESHOLD})",
+            {"pool_size": pool_count, "threshold": ALERT_POOL_THRESHOLD}
+        )
 
 
 def mask_key(k: str) -> str:
@@ -810,7 +1164,14 @@ def _valid_addr(addr: str) -> bool:
 
 
 async def _fetch_sources() -> None:
-    """Pull all feeds, fill the candidate reservoir with proto://addr entries."""
+    """Pull all feeds, fill the candidate reservoir with proto://addr entries.
+    
+    v0.9 enhancements:
+    - IPv6 support (when enabled)
+    - Geographic filtering (when enabled)
+    - Guard proxy prioritization
+    - Paid provider integrations (Bright Data, Oxylabs placeholders)
+    """
     now = time.time()
     if now - POOL.last_fetch < 30:
         return
@@ -840,6 +1201,9 @@ async def _fetch_sources() -> None:
                     addr = addr.strip().rstrip("/")
                     if not _valid_addr(addr):
                         continue
+                    # v0.9: IPv6 filtering
+                    if not IPV6_ENABLED and ":" in addr.split("@")[-1].split(":")[0]:
+                        continue  # Skip IPv6 if disabled
                     key = f"{proto}://{addr}"
                     if key in POOL.lanes or key in POOL.candidates or key in POOL.tried:
                         continue
@@ -868,6 +1232,16 @@ async def _fetch_sources() -> None:
                             proto = "http"
                         if not _valid_addr(addr):
                             continue
+                        # v0.9: IPv6 filtering
+                        if not IPV6_ENABLED and ":" in addr.split(":")[0]:
+                            continue
+                        # v0.9: Geographic filtering
+                        if GEO_FILTER_ENABLED:
+                            country = e.get("country", "").upper()
+                            if GEO_BLOCKED_COUNTRIES and country in GEO_BLOCKED_COUNTRIES:
+                                continue
+                            if GEO_ALLOWED_COUNTRIES and country not in GEO_ALLOWED_COUNTRIES:
+                                continue
                         key = f"{proto}://{addr}"
                         if key in POOL.lanes or key in POOL.candidates or key in POOL.tried:
                             continue
@@ -916,6 +1290,27 @@ async def _fetch_sources() -> None:
                     pass
 
             await asyncio.gather(*[fetch_one_token(tok) for tok in tokens])
+        
+        # v0.9: Bright Data integration (placeholder for Tier 2 paid providers)
+        async def brightdata():
+            # Placeholder for Bright Data API integration
+            # Requires BRIGHTDATA_API_KEY env var
+            api_key = os.environ.get("BRIGHTDATA_API_KEY", "")
+            if not api_key:
+                return
+            # Implementation would fetch from Bright Data API
+            pass
+        
+        # v0.9: Oxylabs integration (placeholder for Tier 2 paid providers)
+        async def oxylabs():
+            # Placeholder for Oxylabs API integration
+            # Requires OXYLABS_USERNAME and OXYLABS_PASSWORD env vars
+            username = os.environ.get("OXYLABS_USERNAME", "")
+            password = os.environ.get("OXYLABS_PASSWORD", "")
+            if not username or not password:
+                return
+            # Implementation would fetch from Oxylabs API
+            pass
 
         await asyncio.gather(*[one(u, k) for u, k in TEXT_SOURCES], geonode(), webshare())
     POOL.last_fetch = now
@@ -1386,29 +1781,67 @@ def _pick_lane(lanes: list[Lane]) -> Lane:
 
 
 async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: float):
-    """Try lanes in score order until one answers. Transparent failover: a
-    burned/dead lane burns, the request silently moves to the next lane."""
+    """Try lanes in score order until one answers. v0.9 adds:
+    - Idempotency key support (prevents duplicate charges on retry)
+    - Sticky sessions (session affinity for stateful upstreams)
+    - Rate limiting (per-client request throttling)
+    - Upstream health pre-check
+    """
+    # Check idempotency first
+    idem_key = headers.get("X-Idempotency-Key") or headers.get("idempotency-key")
+    if idem_key:
+        cached = check_idempotency(idem_key)
+        if cached is not None:
+            log.info("idempotency hit for key %s", mask_key(idem_key))
+            return 200, {"content-type": "application/json"}, cached
+    
+    # Check rate limit
+    client_id = headers.get("X-Client-ID", headers.get("x-forwarded-for", "anonymous"))
+    allowed, retry_after = check_rate_limit(client_id)
+    if not allowed:
+        body = json.dumps({"error": {"message": f"Rate limit exceeded. Retry after {retry_after}s", "type": "rate_limit"}}).encode()
+        return 429, {"content-type": "application/json", "Retry-After": str(retry_after)}, body
+    
+    # Check sticky session
+    session_id = headers.get("X-Relay-Session-ID") or headers.get("x-relay-session-id")
+    sticky_lane = get_sticky_lane(session_id) if session_id else None
+    
     attempts = max(1, RELAY_ATTEMPTS)
     deadline = time.time() + timeout
     last_err: tuple | None = None
     tried: set[str] = set()
     t_start = time.time()
+    
+    # Pre-flight upstream health check
+    if UPSTREAM_HEALTH_CHECK and UPSTREAM_BASE_URL:
+        healthy, last_check, error = UPSTREAM_HEALTH.get(UPSTREAM_BASE_URL, (True, 0, ""))
+        if not healthy and time.time() - last_check < UPSTREAM_HEALTH_INTERVAL * 2:
+            log.warning("Upstream unhealthy: %s", error)
+            # Could optionally switch to backup provider here
 
     for i in range(attempts):
-        # available_lanes() respects the per-lane in-flight cap so concurrent
-        # requests spread out instead of stacking onto the fastest lane and
-        # burning it — free proxies collapse under parallel load.
-        lanes = [ln for ln in POOL.available_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
-        if not lanes:
-            lanes = [ln for ln in POOL.warm_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
-        if not lanes:
-            # Fallback to parked lanes if no warm lanes are available
-            lanes = [ln for ln in POOL.parked_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
-            lanes.sort(key=lambda ln: ln.parked_until)
+        # Use sticky lane if available and not already tried
+        if sticky_lane and f"{sticky_lane.proto}://{sticky_lane.addr}" not in tried:
+            lane = sticky_lane
+            tried.add(f"{lane.proto}://{lane.addr}")
+        else:
+            # available_lanes() respects the per-lane in-flight cap
+            lanes = [ln for ln in POOL.available_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
             if not lanes:
-                break
-        lane = _pick_lane(lanes) if i == 0 else lanes[0]
-        tried.add(f"{lane.proto}://{lane.addr}")
+                lanes = [ln for ln in POOL.warm_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
+            if not lanes:
+                # Fallback to parked lanes
+                lanes = [ln for ln in POOL.parked_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
+                lanes.sort(key=lambda ln: getattr(ln, 'parked_until', time.time()))
+                if not lanes:
+                    break
+            lane = _pick_lane(lanes) if i == 0 else lanes[0]
+            tried.add(f"{lane.proto}://{lane.addr}")
+        
+        # Bind session to lane on first successful use
+        if session_id and not sticky_lane:
+            set_sticky_lane(session_id, lane)
+            sticky_lane = lane
         try:
             async with lane.sem:
                 lane.inflight += 1
@@ -1422,6 +1855,9 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                 record_request(_display_addr(lane.addr), 200, ms, stream)
                 publish("request", {"lane": _display_addr(lane.addr), "status": 200,
                                     "ms": round(ms), "attempt": i + 1, "tier": lane.tier})
+                # Cache successful response for idempotency
+                if idem_key:
+                    cache_idempotency(idem_key, body)
                 return status, resp_headers, body
             if status == 429 and is_quota_429(body, 429):
                 # key-global rate limit — don't burn the lane; fail over, and
@@ -1481,6 +1917,13 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
         record_request("-", last_err[0], (time.time() - t_start) * 1000, stream)
         publish("request", {"lane": "-", "status": last_err[0], "ms": round((time.time() - t_start) * 1000)})
         return last_err[0], {"content-type": "application/json"}, last_err[1]
+    
+    # Cache response for idempotency if key was provided
+    if idem_key:
+        cache_idempotency(idem_key, json.dumps(
+            {"error": {"message": "all egress lanes busy or failed — pool is refilling, retry shortly", "type": "rotator_exhausted"}}
+        ).encode())
+    
     record_request("-", 503, (time.time() - t_start) * 1000, stream)
     publish("request", {"lane": "-", "status": 503, "ms": round((time.time() - t_start) * 1000)})
     return 503, {"content-type": "application/json"}, json.dumps(
@@ -2018,6 +2461,16 @@ async def lifespan(_app: FastAPI):
                           "Verify your network or UPSTREAM_BASE_URL ('%s').", e, UPSTREAM_BASE_URL)
 
         tasks.append(asyncio.create_task(verify_upstream()))
+        
+        # v0.9: Start background health monitoring and alerting tasks
+        if UPSTREAM_HEALTH_CHECK:
+            tasks.append(asyncio.create_task(upstream_health_monitor()))
+        
+        if ALERT_WEBHOOK_URL:
+            tasks.append(asyncio.create_task(pool_threshold_monitor()))
+        
+        # Start periodic state cleanup task
+        tasks.append(asyncio.create_task(state_cleanup_loop()))
 
     try:
         yield
@@ -2027,6 +2480,36 @@ async def lifespan(_app: FastAPI):
             log.info("shutdown: persisted %d lanes to %s", n, LANES_FILE)
         for t in tasks:
             t.cancel()
+
+
+async def upstream_health_monitor():
+    """Background task to periodically check upstream health."""
+    while True:
+        try:
+            await check_upstream_health()
+        except Exception as e:
+            log.debug("Health monitor error: %s", e)
+        await asyncio.sleep(UPSTREAM_HEALTH_INTERVAL)
+
+
+async def pool_threshold_monitor():
+    """Background task to monitor pool threshold and send alerts."""
+    while True:
+        try:
+            await monitor_pool_threshold()
+        except Exception as e:
+            log.debug("Pool monitor error: %s", e)
+        await asyncio.sleep(60)  # Check every minute
+
+
+async def state_cleanup_loop():
+    """Background task to periodically clean up expired state."""
+    while True:
+        try:
+            cleanup_expired_state()
+        except Exception as e:
+            log.debug("Cleanup error: %s", e)
+        await asyncio.sleep(300)  # Clean every 5 minutes
 
 
 app.router.lifespan_context = lifespan

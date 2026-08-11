@@ -47,6 +47,9 @@
   --focus: #aae8ff;
   --radius: 16px;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-elastic: cubic-bezier(0.68, -0.55, 0.265, 1.55);
+  --accent-glow: rgba(170, 232, 255, 0.4);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -161,6 +164,12 @@ header.site-header {
   .logo-title { -webkit-text-fill-color: CanvasText; color: CanvasText; background: none; }
 }
 .logo-sub { font-size: 12px; color: var(--text-muted); letter-spacing: 0.02em; }
+
+/* Floating animation for subtle movement */
+.float-animation {
+  animation: float 4s ease-in-out infinite;
+}
+
 .header-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 
 /* ── Cards / panels ────────────────────────────────────────────── */
@@ -174,7 +183,11 @@ header.site-header {
   box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 18px 50px rgba(0,0,0,0.4);
   transition: border-color 0.25s var(--ease), transform 0.25s var(--ease);
 }
-.card:hover { border-color: var(--surface-border-hi); }
+.card:hover {
+  border-color: var(--surface-border-hi);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px var(--accent-glow);
+}
 
 .card-title {
   display: flex; align-items: center; gap: 9px;
@@ -233,15 +246,45 @@ pre { margin: 0; }
 #baseUrlVal { min-width: 168px; display: inline-block; }
 .status-dot {
   width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
-  background: var(--ok); box-shadow: 0 0 0 0 rgba(126,231,168,0.55);
-  animation: ring 2.4s infinite;
+  background: var(--ok);
+  box-shadow: 0 0 12px var(--ok), 0 0 0 0 rgba(126,231,168,0.55);
+  animation: ring-glow 2.4s infinite;
+  transition: background 0.3s var(--ease), box-shadow 0.3s var(--ease);
 }
-.status-dot.loading { background: var(--warn); animation: ring-w 1.6s infinite; }
-.status-dot.error { background: var(--bad); animation: ring-b 1.1s infinite; }
-@keyframes ring { 0%{box-shadow:0 0 0 0 rgba(126,231,168,.5)} 70%{box-shadow:0 0 0 9px rgba(126,231,168,0)} 100%{box-shadow:0 0 0 0 rgba(126,231,168,0)} }
-@keyframes ring-w { 0%{box-shadow:0 0 0 0 rgba(255,209,102,.5)} 70%{box-shadow:0 0 0 9px rgba(255,209,102,0)} 100%{box-shadow:0 0 0 0 rgba(255,209,102,0)} }
-@keyframes ring-b { 0%{box-shadow:0 0 0 0 rgba(255,138,144,.55)} 70%{box-shadow:0 0 0 9px rgba(255,138,144,0)} 100%{box-shadow:0 0 0 0 rgba(255,138,144,0)} }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+.status-dot.loading { background: var(--warn); animation: ring-warn 1.6s infinite; }
+.status-dot.error { background: var(--bad); animation: ring-error 1.1s infinite; }
+@keyframes ring-glow {
+  0% { box-shadow: 0 0 12px var(--ok), 0 0 0 0 rgba(126,231,168,0.6); transform: scale(1); }
+  50% { transform: scale(1.15); }
+  70% { box-shadow: 0 0 20px var(--ok), 0 0 0 12px rgba(126,231,168,0); transform: scale(1); }
+  100% { box-shadow: 0 0 12px var(--ok), 0 0 0 0 rgba(126,231,168,0); transform: scale(1); }
+}
+@keyframes ring-warn {
+  0% { box-shadow: 0 0 12px var(--warn), 0 0 0 0 rgba(255,209,102,0.6); }
+  70% { box-shadow: 0 0 20px var(--warn), 0 0 0 12px rgba(255,209,102,0); }
+  100% { box-shadow: 0 0 12px var(--warn), 0 0 0 0 rgba(255,209,102,0); }
+}
+@keyframes ring-error {
+  0% { box-shadow: 0 0 12px var(--bad), 0 0 0 0 rgba(255,138,144,0.6); transform: scale(1); }
+  50% { transform: scale(1.1) rotate(5deg); }
+  70% { box-shadow: 0 0 24px var(--bad), 0 0 0 14px rgba(255,138,144,0); transform: scale(1) rotate(0deg); }
+  100% { box-shadow: 0 0 12px var(--bad), 0 0 0 0 rgba(255,138,144,0); transform: scale(1); }
+}
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; box-shadow: 0 0 12px currentColor; }
+  50% { opacity: 0.5; box-shadow: 0 0 4px currentColor; }
+}
+
+
+@keyframes pulse { 0%,100%{opacity:1; box-shadow: 0 0 12px currentColor;} 50%{opacity:.35; box-shadow: 0 0 4px currentColor;} }
 
 /* Live-feed indicator */
 .feed-pill {
@@ -268,6 +311,12 @@ pre { margin: 0; }
   display: flex; flex-direction: column; gap: 2px;
   position: relative; overflow: hidden;
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+  transition: transform 0.3s var(--ease-bounce), border-color 0.3s var(--ease), box-shadow 0.3s var(--ease);
+}
+.stat-pill:hover {
+  transform: translateY(-3px) scale(1.02);
+  border-color: var(--accent);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4), 0 0 0 1px var(--accent-glow);
 }
 .stat-val {
   font-size: 23px; font-weight: 600; letter-spacing: -0.02em;
@@ -283,6 +332,16 @@ pre { margin: 0; }
 /* value flash on change — a quiet "this just updated" cue */
 .flash { animation: flash 0.55s var(--ease); }
 @keyframes flash { 0% { color: var(--accent); } 100% { color: inherit; } }
+
+/* Shimmer loading effect */
+.shimmer {
+  background: linear-gradient(90deg, 
+    var(--surface) 0%, 
+    rgba(255,255,255,0.03) 50%, 
+    var(--surface) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
 
 /* ── Chips / badges ────────────────────────────────────────────── */
 .chip {
@@ -322,15 +381,18 @@ pre { margin: 0; }
 
 /* ── Buttons ───────────────────────────────────────────────────── */
 .action-btn {
-  /* Explicit background-color under the gradient: if background-image fails to
-     paint (forced-colors, print, gradient unsupported) the dark #0a0a0a label
-     would otherwise sit on a transparent → near-black surface at 1.02:1. */
   background-color: #dfe5e9;
   background-image: linear-gradient(135deg, #f4f4f4, #cfd6da);
   color: #0a0a0a; border: none; border-radius: 11px;
   padding: 11px 16px; font-size: 13px; font-weight: 600;
   font-family: inherit; cursor: pointer;
-  transition: transform 0.18s var(--ease), filter 0.18s var(--ease);
+  transition: transform 0.2s var(--ease-bounce), filter 0.2s var(--ease), box-shadow 0.2s var(--ease);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+.action-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-2px) scale(1.03);
+  box-shadow: 0 6px 16px rgba(0,0,0,0.3), 0 0 0 1px var(--accent-glow);
 }
 .action-btn:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
 .action-btn:active:not(:disabled) { transform: translateY(0); }
@@ -1978,30 +2040,55 @@ function drawSpark(id, series, color) {
     cvs.height = Math.round(h * dpr);
   }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
+  
+  // Enhanced fade effect for smooth transitions
+  ctx.fillStyle = REDUCED_MOTION ? 'rgba(7, 7, 7, 1)' : 'rgba(7, 7, 7, 0.3)';
+  ctx.fillRect(0, 0, w, h);
 
   const max = Math.max.apply(null, series) || 1;
   const step = w / (series.length - 1);
   const y = v => h - 2 - (v / max) * (h - 5);
 
+  // Draw glow underneath
+  if (!REDUCED_MOTION) {
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = color;
+  }
+
   ctx.beginPath();
   ctx.moveTo(0, y(series[0]));
   for (let i = 1; i < series.length; i++) ctx.lineTo(i * step, y(series[i]));
 
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, color + 'cc');
-  grad.addColorStop(1, color + '22');
+  // Enhanced gradient stroke with accent highlight
+  const grad = ctx.createLinearGradient(0, 0, w, 0);
+  grad.addColorStop(0, color);
+  grad.addColorStop(0.5, '#aae8ff');
+  grad.addColorStop(1, color);
   ctx.strokeStyle = grad;
-  ctx.lineWidth = 1.6;
+  ctx.lineWidth = REDUCED_MOTION ? 1.6 : 2.2;
   ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
   ctx.stroke();
-
+  
+  // Area fill under the line
   ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
   const fill = ctx.createLinearGradient(0, 0, 0, h);
-  fill.addColorStop(0, color + '2e');
+  fill.addColorStop(0, color + '4d');
   fill.addColorStop(1, color + '00');
   ctx.fillStyle = fill;
+  ctx.shadowBlur = 0;
   ctx.fill();
+  
+  // Draw dots on data points for smaller datasets
+  if (!REDUCED_MOTION && series.length <= 30) {
+    ctx.fillStyle = '#ffffff';
+    for (let i = 0; i < series.length; i++) {
+      const x = i * step;
+      ctx.beginPath();
+      ctx.arc(x, y(series[i]), 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
 }
 
 /* ── lane table (paginated) ─────────────────────────────────── */
@@ -2330,8 +2417,12 @@ function bumpNode(addr, kind) {
 function animNetworkGraph() {
   if (!netCtx || !netCanvas.width) { requestAnimationFrame(animNetworkGraph); return; }
   const { w: cw, h: ch } = vizDims();
-  netCtx.clearRect(0, 0, cw, ch);
-  globalTime += 0.005;
+  
+  // Enhanced fade effect for motion trails
+  netCtx.fillStyle = REDUCED_MOTION ? 'rgba(7, 7, 7, 1)' : 'rgba(7, 7, 7, 0.12)';
+  netCtx.fillRect(0, 0, cw, ch);
+  
+  globalTime += REDUCED_MOTION ? 0.005 : 0.008;
 
   const cx = cw / 2, cy = ch / 2;
   const rx = cw * 0.38, ry = ch * 0.26;
@@ -2350,39 +2441,74 @@ function animNetworkGraph() {
   netCtx.globalCompositeOperation = 'screen';
   netNodes.sort((a, b) => a.z - b.z);
 
-  // beams
+  // Enhanced beams with pulsing glow
   netNodes.forEach(n => {
     const alpha = (n.z + 1.2) / 2.2;
+    const pulseIntensity = REDUCED_MOTION ? 1 : 0.7 + Math.sin(globalTime * 3 + n.angle) * 0.3;
+    
+    // Outer glow
+    netCtx.beginPath();
+    netCtx.moveTo(cx, cy);
+    netCtx.quadraticCurveTo(cx + (n.x - cx) * 0.4, cy + (n.y - cy) * 0.7, n.x, n.y);
+    netCtx.strokeStyle = hexA(n.color, 0.06 * alpha * pulseIntensity);
+    netCtx.lineWidth = 3 + (n.z + 1) * 1.2;
+    netCtx.lineCap = 'round';
+    netCtx.stroke();
+    
+    // Inner beam
     netCtx.beginPath();
     netCtx.moveTo(cx, cy);
     netCtx.quadraticCurveTo(cx + (n.x - cx) * 0.4, cy + (n.y - cy) * 0.7, n.x, n.y);
     const grad = netCtx.createLinearGradient(cx, cy, n.x, n.y);
-    grad.addColorStop(0, 'rgba(251,251,251,0.05)');
-    grad.addColorStop(1, hexA(n.color, 0.13 * alpha));
+    grad.addColorStop(0, 'rgba(251,251,251,0.08)');
+    grad.addColorStop(0.5, hexA(n.color, 0.15 * alpha * pulseIntensity));
+    grad.addColorStop(1, hexA(n.color, 0.2 * alpha * pulseIntensity));
     netCtx.strokeStyle = grad;
-    netCtx.lineWidth = 1 + (n.z + 1) * 0.5;
+    netCtx.lineWidth = 1.5 + (n.z + 1) * 0.6;
+    netCtx.lineCap = 'round';
     netCtx.stroke();
   });
 
-  // nodes
+  // Enhanced nodes with multi-layer glow
   netNodes.forEach(n => {
     const scale = (n.z + 1.8) / 2.8;
-    const radius = 3.5 * scale * (1 + (n.load || 0) * 0.5);
+    const baseRadius = 3.5 * scale;
+    const loadBoost = 1 + (n.load || 0) * 0.8;
+    const radius = baseRadius * loadBoost;
     const alpha = (n.z + 1.2) / 2.2;
+    const pulseGlow = REDUCED_MOTION ? 1 : 1 + Math.sin(globalTime * 4 + n.angle * 2) * 0.3;
 
-    netCtx.shadowBlur = 10 * scale;
+    // Outer glow halo
+    netCtx.shadowBlur = 16 * scale * pulseGlow;
     netCtx.shadowColor = n.color;
     netCtx.fillStyle = n.color;
-    netCtx.globalAlpha = 0.85 * alpha;
+    netCtx.globalAlpha = 0.5 * alpha;
+    netCtx.beginPath();
+    netCtx.arc(n.x, n.y, radius * 1.8, 0, Math.PI * 2);
+    netCtx.fill();
+    
+    // Middle glow
+    netCtx.globalAlpha = 0.75 * alpha;
+    netCtx.beginPath();
+    netCtx.arc(n.x, n.y, radius * 1.3, 0, Math.PI * 2);
+    netCtx.fill();
+    
+    // Core
+    netCtx.globalAlpha = 0.95 * alpha;
     netCtx.beginPath();
     netCtx.arc(n.x, n.y, radius, 0, Math.PI * 2);
     netCtx.fill();
     netCtx.shadowBlur = 0;
     netCtx.globalAlpha = 1;
 
-    netCtx.fillStyle = '#ffffff';
+    // Bright center highlight
+    const highlightGrad = netCtx.createRadialGradient(n.x, n.y, 0, n.x, n.y, radius * 0.6);
+    highlightGrad.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+    highlightGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.6)');
+    highlightGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    netCtx.fillStyle = highlightGrad;
     netCtx.beginPath();
-    netCtx.arc(n.x, n.y, radius * 0.45, 0, Math.PI * 2);
+    netCtx.arc(n.x, n.y, radius * 0.6, 0, Math.PI * 2);
     netCtx.fill();
 
     if (n.pulse > 0) {
@@ -2402,34 +2528,81 @@ function animNetworkGraph() {
     }
   });
 
-  // particles
+  // Enhanced particles with trail effect
   for (let i = netParticles.length - 1; i >= 0; i--) {
     const p = netParticles[i];
-    p.progress += p.speed;
+    p.progress += p.speed * (REDUCED_MOTION ? 1 : 1.3);
     const t = p.progress;
     const px = (1 - t) * (1 - t) * cx + 2 * (1 - t) * t * p.cpX + t * t * p.target.x;
     const py = (1 - t) * (1 - t) * cy + 2 * (1 - t) * t * p.cpY + t * t * p.target.y;
+    const prevT = Math.max(0, t - 0.08);
+    const prevPx = (1 - prevT) * (1 - prevT) * cx + 2 * (1 - prevT) * prevT * p.cpX + prevT * prevT * p.target.x;
+    const prevPy = (1 - prevT) * (1 - prevT) * cy + 2 * (1 - prevT) * prevT * p.cpY + prevT * prevT * p.target.y;
+    
     const scale = (p.target.z + 1.8) / 2.8;
     const col = p.err ? '#ff8a90' : p.target.color;
-    netCtx.shadowBlur = 8 * scale;
+    
+    // Particle trail
+    if (!REDUCED_MOTION && t > 0.08) {
+      const trailGrad = netCtx.createLinearGradient(prevPx, prevPy, px, py);
+      trailGrad.addColorStop(0, hexA(col, 0));
+      trailGrad.addColorStop(1, hexA(col, 0.6));
+      netCtx.strokeStyle = trailGrad;
+      netCtx.lineWidth = 2 * scale;
+      netCtx.lineCap = 'round';
+      netCtx.beginPath();
+      netCtx.moveTo(prevPx, prevPy);
+      netCtx.lineTo(px, py);
+      netCtx.stroke();
+    }
+    
+    // Particle core with glow
+    netCtx.shadowBlur = 12 * scale;
     netCtx.shadowColor = col;
+    netCtx.fillStyle = '#ffffff';
+    netCtx.beginPath();
+    netCtx.arc(px, py, 1.8 * scale, 0, Math.PI * 2);
+    netCtx.fill();
+    
     netCtx.fillStyle = col;
     netCtx.beginPath();
-    netCtx.arc(px, py, 2.2 * scale, 0, Math.PI * 2);
+    netCtx.arc(px, py, 1.2 * scale, 0, Math.PI * 2);
     netCtx.fill();
     netCtx.shadowBlur = 0;
+    
     if (p.progress >= 1) { p.target.pulse = 1; netParticles.splice(i, 1); }
   }
 
-  // core
-  const coreGlow = REDUCED_MOTION ? 10 : 10 + Math.sin(globalTime * 4) * 4;
+  // Enhanced core with pulsing energy
+  const corePulse = REDUCED_MOTION ? 1 : 1 + Math.sin(globalTime * 3) * 0.15;
+  const coreGlow = REDUCED_MOTION ? 12 : 12 + Math.sin(globalTime * 4) * 6;
+  
+  // Outer energy field
+  const energyGrad = netCtx.createRadialGradient(cx, cy, 0, cx, cy, 28 * corePulse);
+  energyGrad.addColorStop(0, 'rgba(170, 232, 255, 0.25)');
+  energyGrad.addColorStop(0.4, 'rgba(170, 232, 255, 0.08)');
+  energyGrad.addColorStop(1, 'rgba(170, 232, 255, 0)');
+  netCtx.fillStyle = energyGrad;
+  netCtx.beginPath();
+  netCtx.arc(cx, cy, 28 * corePulse, 0, Math.PI * 2);
+  netCtx.fill();
+  
+  // Core glow
   netCtx.shadowBlur = coreGlow;
-  netCtx.shadowColor = 'rgba(251,251,251,0.9)';
+  netCtx.shadowColor = 'rgba(251,251,251,0.95)';
   netCtx.fillStyle = '#ffffff';
   netCtx.beginPath();
-  netCtx.arc(cx, cy, 9, 0, Math.PI * 2);
+  netCtx.arc(cx, cy, 9 * corePulse, 0, Math.PI * 2);
   netCtx.fill();
   netCtx.shadowBlur = 0;
+  
+  // Core ring
+  netCtx.strokeStyle = 'rgba(170, 232, 255, 0.5)';
+  netCtx.lineWidth = 1.5;
+  netCtx.beginPath();
+  netCtx.arc(cx, cy, 13 * corePulse, 0, Math.PI * 2);
+  netCtx.stroke();
+  
   netCtx.fillStyle = '#a1a1aa';
   netCtx.font = '8px monospace';
   netCtx.textAlign = 'center';
