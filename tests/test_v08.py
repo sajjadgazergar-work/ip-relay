@@ -142,8 +142,12 @@ def test_relay_success_clears_quota_flag(monkeypatch):
 
 
 def test_quota_429_burns_the_lane(monkeypatch):
-    """v0.8.1: a 429 from a lane means THAT lane's IP is burned — park it.
-    Escalates to key-global only when enough distinct lanes 429 together."""
+    """A 429 from a lane means THAT egress IP is burned — park it and fail over.
+
+    The client sees 503, not 429, on purpose: 9router sets a modelLock when a
+    node answers 429, which would take the whole model offline for a per-IP
+    limit we can recover from by rotating. 503 keeps its retry/fallback path.
+    """
     ln = ir.Lane("1.1.1.1:80", "http")
     ln.mark_ok(100)
     ir.POOL.lanes["http://1.1.1.1:80"] = ln
@@ -152,24 +156,41 @@ def test_quota_429_burns_the_lane(monkeypatch):
         return 429, {"content-type": "application/json"}, QUOTA_BODY
 
     monkeypatch.setattr(ir, "_attempt", fake_attempt)
-    status, _, _ = asyncio.run(ir.relay({"model": "m"}, "chat/completions", False, {}, 30))
-    assert status == 429
-    assert ln.parked_until > 0.0          # lane parked (burned IP)
+    status, _, body = asyncio.run(ir.relay({"model": "m"}, "chat/completions", False, {}, 30))
+    assert status == 503
+    assert body == QUOTA_BODY               # upstream reason preserved for the caller
+    assert ln.parked_until > 0.0            # lane parked (burned IP)
     assert ir.QUOTA_STATE["exhausted"] is False   # not key-global yet (1 lane only)
 
 
 def test_quota_escalates_after_three_distinct_lanes():
-    """Three distinct lanes 429ing within the window = key-global quota."""
+    """Three distinct lanes 429ing within the window, with NO success in that
+    window, means the fault is systemic (UA gate/dead keys), not per-proxy."""
     ir.QUOTA_STATE["_429_window"] = []
     ir.QUOTA_STATE["_direct_429s"] = 0
     ir.QUOTA_STATE["exhausted"] = False
     ir.QUOTA_STATE["backoff_sec"] = 90
+    ir.REQ_LOG.clear()                     # no recent 200s -> escalation allowed
     ir._note_lane_429("1.1.1.1:80")
     ir._note_lane_429("2.2.2.2:80")
     assert ir.QUOTA_STATE["exhausted"] is False        # 2 distinct: not yet
     ir._note_lane_429("3.3.3.3:80")
     assert ir.QUOTA_STATE["exhausted"] is True         # 3 distinct: key-global
     assert ir.QUOTA_STATE["backoff_sec"] == 180
+
+
+def test_quota_does_not_escalate_while_traffic_succeeds():
+    """Failover chains burn several lanes per request in normal operation. As
+    long as something answered 200 in the same window, that is not systemic."""
+    ir.QUOTA_STATE["_429_window"] = []
+    ir.QUOTA_STATE["_direct_429s"] = 0
+    ir.QUOTA_STATE["exhausted"] = False
+    ir.QUOTA_STATE["backoff_sec"] = 90
+    ir.REQ_LOG.clear()
+    ir.record_request("9.9.9.9:80", 200, 1200.0)       # a fresh success
+    for a in ("1.1.1.1:80", "2.2.2.2:80", "3.3.3.3:80", "4.4.4.4:80"):
+        ir._note_lane_429(a)
+    assert ir.QUOTA_STATE["exhausted"] is False
 
 
 def test_quota_escalates_after_three_direct_429s():
@@ -849,3 +870,113 @@ def test_probe_records_proxy_error_class(monkeypatch):
     assert out is None
     # v0.8.1: ProxyError = dead/rejecting proxy, NOT a link storm
     assert ir._LAST_PROBE_ERR["http://1.2.3.4:8080"] == "proxy"
+
+
+# ══════════════════════════════════════════════════════════════════
+# v0.9 — the User-Agent gate
+#
+# Measured against opencode.ai/zen/v1 on 2026-08-15, single proxy egress IP,
+# interleaved requests: every UA containing "opencode" -> 200 (5/5), every other
+# UA -> 429 FreeUsageLimitError (0/5), no UA at all -> 403 (Cloudflare 1010).
+# These tests pin the behaviour so a refactor cannot silently reintroduce the
+# Chrome UA that made the whole project look broken.
+# ══════════════════════════════════════════════════════════════════
+
+def test_upstream_headers_always_carry_opencode_ua():
+    h = ir.upstream_headers()
+    assert "opencode" in h["User-Agent"].lower()
+
+
+def test_probe_headers_carry_opencode_ua(monkeypatch):
+    """The prober must use the gated UA too, or every candidate looks burned."""
+    seen = {}
+
+    class Cap:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        class _R:
+            status_code = 200
+            content = json.dumps({"choices": [{"message": {"content": "x"},
+                                               "finish_reason": "stop"}]}).encode()
+            text = ""
+        async def get(self, *a, **k):
+            seen["screen"] = k.get("headers", {})
+            return self._R()
+        async def post(self, *a, **k):
+            seen["probe"] = k.get("headers", {})
+            return self._R()
+
+    monkeypatch.setattr(ir.httpx, "AsyncClient", Cap)
+    ln = asyncio.run(ir._probe_candidate("http://9.9.9.9:8080"))
+    assert ln is not None                       # real completion -> promoted
+    assert "opencode" in seen["screen"]["User-Agent"].lower()
+    assert "opencode" in seen["probe"]["User-Agent"].lower()
+
+
+def test_probe_drops_quota_burned_ip(monkeypatch):
+    """A 429 in stage 2 means that egress IP is spent — never promote it."""
+    class Burned:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        class _Screen:
+            status_code = 200
+            content = b"{}"
+        class _Burn:
+            status_code = 429
+            content = json.dumps({"error": {"type": "FreeUsageLimitError"}}).encode()
+            text = '{"error":{"type":"FreeUsageLimitError"}}'
+        async def get(self, *a, **k):
+            return self._Screen()
+        async def post(self, *a, **k):
+            return self._Burn()
+
+    monkeypatch.setattr(ir.httpx, "AsyncClient", Burned)
+    assert asyncio.run(ir._probe_candidate("http://8.8.8.8:8080")) is None
+    assert ir._LAST_PROBE_ERR["http://8.8.8.8:8080"] == "burned"
+    assert ir.STATS["probes_burned"] == 1
+
+
+def test_client_ua_is_rewritten_unless_it_says_opencode():
+    """Forwarding a client's httpx/curl/Chrome UA guarantees a 429, so it is
+    replaced. An opencode-identifying client UA is passed through as-is."""
+    class Req:
+        def __init__(self, ua):
+            self.headers = {"user-agent": ua}
+
+    h = ir.build_upstream_headers(request=Req("python-httpx/0.27.0"))
+    assert "opencode" in h["User-Agent"].lower()
+    assert "httpx" not in h["User-Agent"].lower()
+
+    h = ir.build_upstream_headers(request=Req("opencode/1.2.3 (darwin)"))
+    assert h["User-Agent"] == "opencode/1.2.3 (darwin)"
+
+
+def test_settings_reject_non_opencode_ua():
+    updates, errors = ir.validate_settings_payload({"upstream_user_agent": "curl/8.5.0"})
+    assert "upstream_user_agent" not in updates
+    assert any("opencode" in e for e in errors)
+
+    updates, errors = ir.validate_settings_payload({"upstream_user_agent": "opencode/2.0"})
+    assert updates["upstream_user_agent"] == "opencode/2.0"
+    assert not errors
+
+
+def test_apply_settings_falls_back_when_ua_is_wrong():
+    """Even if settings.json is hand-edited to a bad UA, the runtime refuses it."""
+    ir.apply_settings({"upstream_user_agent": "Mozilla/5.0"}, persist=False)
+    assert "opencode" in ir.UPSTREAM_UA.lower()
+    ir.apply_settings({"upstream_user_agent": "opencode/1.0"}, persist=False)
+
+
+def test_diagnostics_warns_on_wrong_ua(monkeypatch):
+    monkeypatch.setattr(ir, "UPSTREAM_UA", "curl/8.5.0")
+    warns = " ".join(ir.config_warnings())
+    assert "upstream_user_agent" in warns and "opencode" in warns

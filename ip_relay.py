@@ -58,7 +58,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-VERSION = "0.8.1"
+VERSION = "0.9.0"
 
 # ── settings (env as base, settings.json overlays; UI writes the file) ──
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "settings.json")
@@ -85,8 +85,27 @@ DEFAULTS = {
     "max_lanes_per_subnet": 3,        # /24 diversity cap (0 = unlimited)
     "adaptive_concurrency": True,     # auto-tune probe concurrency to the link
     "persist_lanes": True,            # remember scored lanes across restarts
+    # The upstream free tier gates on User-Agent (see build_upstream_headers).
+    # Anything containing "opencode" (case-insensitive) passes; everything else
+    # gets an instant 429 regardless of IP or key.
+    "upstream_user_agent": "opencode/1.0",
 }
 settings: dict = dict(DEFAULTS)
+
+UPSTREAM_UA: str = str(DEFAULTS["upstream_user_agent"])
+
+UPSTREAM_API_KEYS: list[str] = ["public"]
+_upstream_key_idx: int = 0
+
+
+def get_upstream_key() -> str:
+    """Return the next upstream API key in round-robin sequence."""
+    global _upstream_key_idx
+    if not UPSTREAM_API_KEYS:
+        return "public"
+    key = UPSTREAM_API_KEYS[_upstream_key_idx % len(UPSTREAM_API_KEYS)]
+    _upstream_key_idx += 1
+    return key
 
 # Setting bounds enforced at the API boundary (min, max). Anything outside is
 # rejected with a clear error instead of silently clamped, so the operator
@@ -193,6 +212,7 @@ def load_settings() -> None:
         "max_lanes_per_subnet": int(os.environ.get("MAX_LANES_PER_SUBNET", DEFAULTS["max_lanes_per_subnet"])),
         "adaptive_concurrency": os.environ.get("ADAPTIVE_CONCURRENCY", "1") in ("1", "true", "yes"),
         "persist_lanes": os.environ.get("PERSIST_LANES", "1") in ("1", "true", "yes"),
+        "upstream_user_agent": str(os.environ.get("UPSTREAM_USER_AGENT") or DEFAULTS["upstream_user_agent"]).strip(),
     }
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as f:
@@ -229,11 +249,14 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     global RELAY_PROXY_TIMEOUT, RELAY_ATTEMPTS, LANE_COOLDOWN_SEC, LANE_RECOVER_SEC
     global DIRECT_LANE, WEBSHARE_TOKEN, ALLOW_SOCKS
     global LANE_MAX_INFLIGHT, MAX_LANES_PER_SUBNET, ADAPTIVE_CONCURRENCY, PERSIST_LANES
+    global UPSTREAM_API_KEYS, UPSTREAM_UA
     old_base, old_key = UPSTREAM_BASE_URL, UPSTREAM_API_KEY
     for k, v in new.items():
         if k in DEFAULTS:
             settings[k] = v
     UPSTREAM_API_KEY = str(settings["upstream_api_key"]).strip()
+    raw_keys = [k.strip() for k in UPSTREAM_API_KEY.replace("\n", ",").split(",") if k.strip()]
+    UPSTREAM_API_KEYS = raw_keys if raw_keys else ["public"]
     UPSTREAM_BASE_URL = str(settings["upstream_base_url"]).rstrip("/")
     RELAY_API_KEY = str(settings["relay_api_key"]).strip()
     PROBE_MODEL = str(settings["probe_model"])
@@ -252,6 +275,13 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     MAX_LANES_PER_SUBNET = max(0, int(settings["max_lanes_per_subnet"]))
     ADAPTIVE_CONCURRENCY = bool(settings["adaptive_concurrency"])
     PERSIST_LANES = bool(settings["persist_lanes"])
+    UPSTREAM_UA = str(settings.get("upstream_user_agent") or DEFAULTS["upstream_user_agent"]).strip() \
+        or str(DEFAULTS["upstream_user_agent"])
+    if "opencode" not in UPSTREAM_UA.lower():
+        log.warning("upstream_user_agent %r does not contain 'opencode' — the free tier "
+                    "will answer 429 for every request. Falling back to %r.",
+                    UPSTREAM_UA, DEFAULTS["upstream_user_agent"])
+        UPSTREAM_UA = str(DEFAULTS["upstream_user_agent"])
     if not ADAPTIVE_CONCURRENCY:
         ADAPT["current"] = TEST_CONCURRENCY
     else:
@@ -295,6 +325,14 @@ def validate_settings_payload(body: dict) -> tuple[dict, list[str]]:
         if k == "upstream_base_url" and isinstance(v, str) and v.strip():
             if not v.strip().lower().startswith(("http://", "https://")):
                 errors.append("upstream_base_url: must start with http:// or https://")
+                continue
+        if k == "upstream_user_agent" and isinstance(v, str):
+            if not v.strip():
+                errors.append("upstream_user_agent: cannot be empty")
+                continue
+            if "opencode" not in v.lower():
+                errors.append("upstream_user_agent: must contain 'opencode' — the free "
+                              "tier answers 429 to every other User-Agent")
                 continue
         updates[k] = v
     return updates, errors
@@ -359,11 +397,13 @@ async def validate_upstream(base_url: str, api_key: str) -> dict:
 def public_settings() -> dict:
     s = dict(settings)
     if s.get("upstream_api_key"):
-        s["upstream_api_key"] = mask_key(str(s["upstream_api_key"]))
+        keys = str(s["upstream_api_key"]).split(",")
+        s["upstream_api_key"] = ",".join(mask_key(k) for k in keys)
     if s.get("relay_api_key"):
         s["relay_api_key"] = mask_key(str(s["relay_api_key"]))
     if s.get("webshare_token"):
-        s["webshare_token"] = mask_key(str(s["webshare_token"]))
+        tokens = str(s["webshare_token"]).split(",")
+        s["webshare_token"] = ",".join(mask_key(tok) for tok in tokens)
     return s
 
 
@@ -540,8 +580,11 @@ class Pool:
     def warm_lanes(self) -> list[Lane]:
         now = time.time()
         warm = [ln for ln in self.lanes.values() if ln.parked_until < now and ln.score > 0.05]
-        # rank by effective latency (unknown latency = middling), then score.
-        # a lane that answered in 5s beats one that took 34s at equal score.
+        # Rank by effective latency (unknown latency = middling), then score.
+        # A lane that answered in 500ms beats one that took 3s at equal score.
+        # No provider-specific ordering here: a lane only reaches the pool after
+        # passing a real completion probe, so "Webshare last" style heuristics
+        # are unnecessary — burned IPs never get promoted in the first place.
         warm.sort(key=lambda ln: (ln.lat_ms if ln.lat_ms else 8000, -ln.score))
         return warm
 
@@ -619,12 +662,21 @@ QUOTA_WINDOW_SEC = 45
 
 
 def _note_lane_429(addr: str) -> None:
-    """Record a per-IP 429. Parks nothing globally; escalates to key-global
-    only when enough distinct lanes burn in a tight window."""
+    """Record a per-IP 429.
+
+    With the correct opencode UA in place, a 429 means THAT egress IP has spent
+    its free-tier budget — it is never a statement about our API key. So the
+    normal action is: park the lane, keep serving from the others.
+
+    A key-global escalation is still worth having, because it is the signature
+    of a systemic fault (upstream changed the UA gate, or every key is dead):
+    when ≥QUOTA_LANE_THRESHOLD *distinct* lanes 429 inside QUOTA_WINDOW_SEC, the
+    problem is not the proxies. We back off probing and say so loudly, since
+    hammering in that state just burns fresh IPs for nothing.
+    """
     now = time.time()
     w = QUOTA_STATE["_429_window"]
     w.append((now, addr))
-    # keep only recent, distinct lanes
     w[:] = [(t, a) for t, a in w if now - t <= QUOTA_WINDOW_SEC]
     distinct = {a for _, a in w}
     if addr == "":
@@ -634,8 +686,19 @@ def _note_lane_429(addr: str) -> None:
             QUOTA_STATE["_direct_429s"] = 0
         return
     if len(distinct) >= QUOTA_LANE_THRESHOLD:
-        log.info("quota: %d distinct lanes 429 in %ds — treating as key-global",
-                 len(distinct), QUOTA_WINDOW_SEC)
+        # Guard against false escalation: a single client request can burn
+        # several lanes in one failover chain, which is normal operation, not a
+        # systemic fault. Only escalate when NOTHING has succeeded in the same
+        # window — that is the real signature of "upstream is refusing us
+        # everywhere" (UA gate changed, or all keys dead).
+        cutoff = now - QUOTA_WINDOW_SEC
+        recent_ok = any(r[0] >= cutoff and r[2] == 200 for r in REQ_LOG)
+        if recent_ok:
+            return
+        log.warning("quota: %d distinct egress IPs 429'd within %ds with zero successes — "
+                    "this is systemic, not per-proxy. Check upstream_user_agent (currently "
+                    "%r; it must contain 'opencode') and that the keys are live.",
+                    len(distinct), QUOTA_WINDOW_SEC, UPSTREAM_UA)
         _note_upstream_429()
         QUOTA_STATE["_429_window"] = []
 
@@ -874,8 +937,8 @@ async def _fetch_sources() -> None:
                     if "://" in line:
                         proto, addr = line.split("://", 1)
                     proto = proto.lower()
-                    if proto not in ("http", "https", "socks4", "socks5"):
-                        proto = "http"
+                    if proto not in ("http", "https", "socks5"):
+                        proto = "socks5" if proto.startswith("socks") else "http"
                     if proto.startswith("socks") and not ALLOW_SOCKS:
                         continue
                     addr = addr.strip().rstrip("/")
@@ -905,8 +968,8 @@ async def _fetch_sources() -> None:
                     for proto in protos:
                         if proto.startswith("socks") and not ALLOW_SOCKS:
                             continue
-                        if proto not in ("http", "https", "socks4", "socks5"):
-                            proto = "http"
+                        if proto not in ("http", "https", "socks5"):
+                            proto = "socks5" if proto.startswith("socks") else "http"
                         if not _valid_addr(addr):
                             continue
                         key = f"{proto}://{addr}"
@@ -966,28 +1029,20 @@ async def _fetch_sources() -> None:
 
 
 # ── probing ───────────────────────────────────────────────────────
-# Cheap screen first (TCP connect via the proxy to a tiny http endpoint, no
-# upstream quota spent), then a real 1-token upstream probe to confirm the IP
-# isn't already quota-burned.
+# Two stages. Stage 1 is a cheap reachability screen through the proxy (no
+# completion tokens spent). Stage 2 is a real 1-token completion, which is the
+# ONLY way to tell a usable egress IP from one whose free-tier quota is already
+# burned — /models answers 200 even from a fully rate-limited IP, so screening
+# alone promotes dead lanes. Both stages carry the opencode UA (see
+# build_upstream_headers): with any other UA every probe 429s and the pool
+# starves.
 async def _screen(c: httpx.AsyncClient) -> bool:
-    # 1. Try Upstream Models Endpoint
     try:
-        r = await c.get(f"{UPSTREAM_BASE_URL}/models", headers=upstream_headers(), timeout=4)
-        if r.status_code in (200, 401, 403, 404, 405):
-            return True
-    except Exception:
-        pass
-    # 2. Fallback: Try Cloudflare 204
-    try:
-        r = await c.get("http://cp.cloudflare.com/generate_204", timeout=4)
-        if r.status_code in (200, 204):
-            return True
-    except Exception:
-        pass
-    # 3. Fallback: Try Firefox portal success text
-    try:
-        r = await c.get("http://detectportal.firefox.com/success.txt", timeout=4)
-        if r.status_code in (200, 204) or b"success" in r.content:
+        r = await c.get(f"{UPSTREAM_BASE_URL}/models",
+                        headers={"Authorization": "Bearer public", "User-Agent": UPSTREAM_UA},
+                        timeout=4)
+        # 403 = Cloudflare blocking this proxy IP outright (error code 1010).
+        if r.status_code in (200, 401):
             return True
     except Exception:
         pass
@@ -996,69 +1051,58 @@ async def _screen(c: httpx.AsyncClient) -> bool:
 
 async def _probe_candidate(key: str) -> Lane | None:
     proto, addr = key.split("://", 1)
-    proxy_url = f"{'http' if proto in ('http','https') else proto}://{addr}"
+    # httpx has no socks4 transport — everything socks* is dialled as socks5.
+    scheme = "socks5" if proto.startswith("socks") else "http" if proto in ("http", "https") else proto
+    proxy_url = f"{scheme}://{addr}"
     try:
-        # Stage 1: Fast connectivity screening (max 4 seconds)
+        # Stage 1: reachability (max 4s), no quota spent.
         async with httpx.AsyncClient(proxy=proxy_url, timeout=4, verify=False) as c:
             if not await _screen(c):
                 _LAST_PROBE_ERR[key] = "proxy"   # proxy reached but screen failed
                 return None
 
-        # Stage 2: Full upstream completions check
-        try:
-            async with httpx.AsyncClient(proxy=proxy_url, timeout=PROBE_TIMEOUT, verify=False) as c:
-                t0 = time.time()
-                r = await c.post(
-                    f"{UPSTREAM_BASE_URL}/chat/completions",
-                    headers=upstream_headers(),
-                    json={"model": PROBE_MODEL, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
-                )
-                lat = (time.time() - t0) * 1000
-                if r.status_code == 200 and _looks_like_completion(r.content):
-                    # reject lanes too slow to ever serve a real request
-                    cutoff = min(RELAY_PROXY_TIMEOUT * 1000, PROBE_TIMEOUT * 1000) * 0.8
-                    if lat > cutoff:
-                        ln = Lane(addr, proto)
-                        ln.mark_fail(burn=True)
-                        ln.last_probe = time.time()
-                        log.warning("Prober: Lane %s passed, but latency was too slow (%dms > limit %dms)",
-                                    _display_addr(addr), int(lat), int(cutoff))
-                        return ln
-                    ln = Lane(addr, proto)
-                    ln.mark_ok(lat)
-                    log.info("Prober: +Lane %s passed completion test (%dms)", _display_addr(addr), int(lat))
-                    STATS["probes_ok"] += 1
-                    return ln
-                elif r.status_code == 429 and is_quota_429(r.content, 429):
-                    # Per-IP rate limit (the proxy's egress IP is burned by the
-                    # upstream — shared public proxies are ALREADY exhausted by
-                    # other scrapers). Park THIS lane; keep probing the rest.
-                    # Only escalates to key-global when enough distinct lanes
-                    # 429 in a tight window (see _note_lane_429).
-                    _note_lane_429(addr)
-                    STATS["probes_burned"] += 1
-                    log.info("Prober: Lane %s rate-limited (429) — parking, probing continues", _display_addr(addr))
-                    ln = Lane(addr, proto)
-                    ln.mark_fail(burn=True)
-                    ln.last_probe = time.time()
-                    return ln
-                else:
-                    _LAST_PROBE_ERR[key] = "http"
-                    log.warning("Prober: Lane %s failed Stage 2: HTTP %d (Response: %s)",
-                                _display_addr(addr), r.status_code, r.text[:100].strip())
-        except Exception as e:
-            # Distinguish link/NAT exhaustion (ConnectError/ConnectTimeout — we
-            # cannot even reach the proxy host, the CPE table is full) from a
-            # dead/rejecting proxy (ProxyError/RemoteProtocolError/ReadError —
-            # the proxy exists but is broken). Only the former should shrink
-            # adaptive concurrency; the latter is just the nature of a free
-            # public list and must NOT count as a link storm.
-            _LAST_PROBE_ERR[key] = _classify_probe_error(e)
-            log.warning("Prober: Lane %s failed Stage 2 connection: %s", _display_addr(addr), type(e).__name__)
+        # Stage 2: real 1-token completion — proves the egress IP is not
+        # quota-burned. Costs one token of THIS proxy IP's free budget, which is
+        # exactly what we are shopping for.
+        async with httpx.AsyncClient(proxy=proxy_url, timeout=PROBE_TIMEOUT, verify=False) as c:
+            t0 = time.time()
+            r = await c.post(
+                f"{UPSTREAM_BASE_URL}/chat/completions",
+                headers=upstream_headers(),
+                json={"model": PROBE_MODEL, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
+            )
+            lat = (time.time() - t0) * 1000
+
+        if r.status_code == 200 and _looks_like_completion(r.content):
+            cutoff = min(RELAY_PROXY_TIMEOUT * 1000, PROBE_TIMEOUT * 1000) * 0.9
+            if lat > cutoff:
+                _LAST_PROBE_ERR[key] = "slow"
+                log.info("Prober: %s answered but too slow (%dms > %dms) — skipped",
+                         _display_addr(addr), int(lat), int(cutoff))
+                return None
+            ln = Lane(addr, proto)
+            ln.mark_ok(lat)
+            log.info("Prober: +Lane %s passed completion probe (%dms)", _display_addr(addr), int(lat))
+            STATS["probes_ok"] += 1
+            return ln
+
+        if r.status_code == 429:
+            # This egress IP's free quota is already spent (shared public proxies
+            # usually are). Not our key's problem — drop the candidate, keep going.
+            _LAST_PROBE_ERR[key] = "burned"
+            STATS["probes_burned"] += 1
+            log.info("Prober: %s is quota-burned (429) — dropped", _display_addr(addr))
+            return None
+
+        _LAST_PROBE_ERR[key] = "http"
+        log.info("Prober: %s failed stage 2: HTTP %d %s", _display_addr(addr),
+                 r.status_code, r.text[:80].strip())
+        return None
     except Exception as e:
         _LAST_PROBE_ERR[key] = _classify_probe_error(e)
-        log.warning("Prober: Lane %s failed Stage 1 setup: %s", _display_addr(addr), type(e).__name__)
+        log.warning("Prober: Lane %s failed: %s", _display_addr(addr), type(e).__name__)
     return None
+
 
 async def _churn_batch() -> None:
     """Test a batch of candidates, promoting the good into the pool."""
@@ -1404,7 +1448,9 @@ async def _attempt(lane: Lane, payload: dict, path: str, headers: dict, timeout:
     completion — malicious/echo proxies can reflect our own request back with
     a 200, which must be treated as a lane failure, not a success."""
     proxy_url = lane.url()
-    kwargs: dict = {"timeout": httpx.Timeout(timeout, connect=12), "verify": False}
+    # Fast timeouts: 2s connect, max 4s read per attempt so dead proxies fail over instantly!
+    attempt_timeout = min(4.0, timeout)
+    kwargs: dict = {"timeout": httpx.Timeout(attempt_timeout, connect=2.0), "verify": False}
     if proxy_url:
         kwargs["proxy"] = proxy_url
     t0 = time.time()
@@ -1422,7 +1468,7 @@ async def _attempt(lane: Lane, payload: dict, path: str, headers: dict, timeout:
                 return 502, {"content-type": "application/json"}, json.dumps(
                     {"error": {"message": "lane returned invalid body", "type": "lane_invalid"}}).encode()
         elif resp.status_code == 429 and is_quota_429(body, 429):
-            lane.mark_fail(burn=True)
+            lane.mark_fail(burn=False)
         return resp.status_code, dict(resp.headers), body
 
 
@@ -1461,6 +1507,8 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
     tried: set[str] = set()
     t_start = time.time()
 
+    # To prevent key-global 429 locks when we have multiple keys to cycle through,
+    # generate headers on a per-attempt basis using a fresh picked key.
     for i in range(attempts):
         # available_lanes() respects the per-lane in-flight cap so concurrent
         # requests spread out instead of stacking onto the fastest lane and
@@ -1476,11 +1524,19 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                 break
         lane = _pick_lane(lanes) if i == 0 else lanes[0]
         tried.add(f"{lane.proto}://{lane.addr}")
+        
+        # Pick next round-robin key and build headers for this specific attempt
+        attempt_headers = build_upstream_headers(request=None, custom_key=None)
+        if headers:
+            for k, v in headers.items():
+                if k.lower() != "authorization":
+                    attempt_headers[k] = v
+                    
         try:
             async with lane.sem:
                 lane.inflight += 1
                 try:
-                    status, resp_headers, body = await _attempt(lane, payload, path, headers, min(timeout, RELAY_PROXY_TIMEOUT))
+                    status, resp_headers, body = await _attempt(lane, payload, path, attempt_headers, min(timeout, RELAY_PROXY_TIMEOUT))
                 finally:
                     lane.inflight -= 1
             if status == 200:
@@ -1491,15 +1547,16 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                                     "ms": round(ms), "attempt": i + 1, "tier": lane.tier})
                 return status, resp_headers, body
             if status == 429 and is_quota_429(body, 429):
-                # Per-IP rate limit — park the lane, fail over. Escalates to
-                # key-global only when enough distinct lanes 429 (see
-                # _note_lane_429). Fail fast (2 attempts max) once the key
-                # is known-exhausted.
+                # This egress IP's free-tier budget is spent. Park it for the
+                # cooldown — leaving it warm (the pre-0.9 behaviour) meant the
+                # next request picked the same dead lane again, which is how a
+                # 1.4k-request pool logged 15k failovers. Rotation only works if
+                # a burned IP actually leaves rotation.
                 lane.mark_fail(burn=True)
                 _note_lane_429(lane.addr)
                 STATS["failovers"] += 1
                 last_err = (429, body)
-                if i >= 1 or time.time() > deadline or QUOTA_STATE["exhausted"]:
+                if i >= (attempts - 1) or time.time() > deadline or QUOTA_STATE["exhausted"]:
                     break
                 continue
             # invalid-body 502 from a burned lane: fail over, don't surface
@@ -1544,9 +1601,11 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
             continue
 
     if last_err and last_err[0] == 429:
-        record_request("-", 429, (time.time() - t_start) * 1000, stream)
-        publish("request", {"lane": "-", "status": 429, "ms": round((time.time() - t_start) * 1000)})
-        return 429, {"content-type": "application/json"}, last_err[1]
+        # Avoid returning HTTP 429 to 9router on proxy-wide limits, so 9router does not set a modelLock.
+        # Respond with 503 Service Unavailable, letting 9router retry or fall back cleanly.
+        record_request("-", 503, (time.time() - t_start) * 1000, stream)
+        publish("request", {"lane": "-", "status": 503, "ms": round((time.time() - t_start) * 1000)})
+        return 503, {"content-type": "application/json"}, last_err[1]
     if last_err and isinstance(last_err[0], int) and last_err[0] >= 500:
         record_request("-", last_err[0], (time.time() - t_start) * 1000, stream)
         publish("request", {"lane": "-", "status": last_err[0], "ms": round((time.time() - t_start) * 1000)})
@@ -1588,6 +1647,14 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                 break
         lane = _pick_lane(lanes) if i == 0 else lanes[0]
         tried.add(f"{lane.proto}://{lane.addr}")
+
+        # Pick next round-robin key and build headers for this specific attempt
+        attempt_headers = build_upstream_headers(request=None, custom_key=None)
+        if headers:
+            for k, v in headers.items():
+                if k.lower() != "authorization":
+                    attempt_headers[k] = v
+
         client = None
         resp = None
         t0 = time.time()
@@ -1596,7 +1663,7 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                 proxy=lane.url(),
                 timeout=httpx.Timeout(min(timeout, RELAY_PROXY_TIMEOUT), connect=12),
                 verify=False)
-            req = client.build_request("POST", f"{UPSTREAM_BASE_URL}/{path}", headers=headers, json=payload)
+            req = client.build_request("POST", f"{UPSTREAM_BASE_URL}/{path}", headers=attempt_headers, json=payload)
             resp = await client.send(req, stream=True)
             status = resp.status_code
             if status == 200:
@@ -1669,13 +1736,14 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                     break
                 continue
             if status == 429 and is_quota_429(await resp.aread(), 429):
+                # Same as the non-streaming path: burn, don't just demote.
                 lane.mark_fail(burn=True)
                 _note_lane_429(lane.addr)
                 STATS["failovers"] += 1
                 last_err = (429, b"")
                 await resp.aclose()
                 await client.aclose()
-                if i >= 1 or time.time() > deadline or QUOTA_STATE["exhausted"]:
+                if i >= (attempts - 1) or time.time() > deadline or QUOTA_STATE["exhausted"]:
                     break
                 continue
             # other 4xx (400/401/403): surface immediately, not a proxy problem
@@ -1704,7 +1772,8 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
             continue
 
     if last_err and last_err[0] == 429:
-        return 429, {"content-type": "application/json"}, _stream_one(last_err[1] or b"")
+        # Avoid returning HTTP 429 to 9router on proxy-wide limits, so 9router does not set a modelLock.
+        return 503, {"content-type": "application/json"}, _stream_one(last_err[1] or b"")
     if last_err and isinstance(last_err[0], int) and last_err[0] >= 500:
         return last_err[0], {"content-type": "application/json"}, _stream_one(last_err[1])
     return 503, {"content-type": "application/json"}, _stream_one(json.dumps(
@@ -1712,19 +1781,40 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
     ).encode())
 
 
-def upstream_headers() -> dict:
+def upstream_headers(custom_key: str | None = None) -> dict:
     """Headers for upstream calls. The Authorization header is OMITTED when the
     key is empty — httpx rejects 'Bearer ' (empty value) with
-    LocalProtocolError, which silently killed every probe and relayed request."""
-    h = {"Content-Type": "application/json"}
-    if UPSTREAM_API_KEY:
-        h["Authorization"] = f"Bearer {UPSTREAM_API_KEY}"
+    LocalProtocolError, which silently killed every probe and relayed request.
+
+    The opencode User-Agent is included on EVERY upstream call (probes, models
+    fetch, relayed requests) — see build_upstream_headers for why."""
+    h = {"Content-Type": "application/json", "User-Agent": UPSTREAM_UA}
+    key = custom_key or get_upstream_key()
+    if key:
+        h["Authorization"] = f"Bearer {key}"
     return h
 
 
-def build_upstream_headers(request: Request) -> dict:
-    h = upstream_headers()
-    h["User-Agent"] = request.headers.get("user-agent", "ip-relay")
+def build_upstream_headers(request: Request | None = None, custom_key: str | None = None) -> dict:
+    """Headers for upstream calls.
+
+    CRITICAL (measured 2026-08-15 against opencode.ai/zen/v1): the free-tier
+    gate is keyed on the User-Agent, NOT only on the egress IP. A UA whose
+    lowercase form contains "opencode" gets HTTP 200; every other UA
+    (Chrome, python-httpx, curl, axios, node-fetch, Go-http-client) gets an
+    instant 429 FreeUsageLimitError on the *same* IP and the *same* key.
+
+    So we always present an opencode client UA. The client's own UA is
+    forwarded only when it already identifies as opencode — otherwise it is
+    replaced, because forwarding it guarantees a 429.
+    """
+    h = upstream_headers(custom_key=custom_key)
+    ua = UPSTREAM_UA
+    if request:
+        user_ua = request.headers.get("user-agent", "")
+        if user_ua and "opencode" in user_ua.lower():
+            ua = user_ua
+    h["User-Agent"] = ua
     return h
 
 
@@ -1775,9 +1865,23 @@ async def get_models_cached() -> tuple[int, str, bytes]:
         async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10)) as client:
             resp = await client.get(f"{UPSTREAM_BASE_URL}/models", headers=upstream_headers())
             _models_retry_at = 0.0
+            
+            # Filter OpenCode models to return ONLY -free models and prioritize hy3-free at index 0
+            body_bytes = resp.content
+            if resp.status_code == 200:
+                try:
+                    data = json.loads(resp.content)
+                    if "data" in data and isinstance(data["data"], list):
+                        free_models = [m for m in data["data"] if m.get("id", "").endswith("-free")]
+                        free_models.sort(key=lambda m: 0 if m.get("id") == "hy3-free" else 1)
+                        data["data"] = free_models
+                        body_bytes = json.dumps(data).encode()
+                except Exception as je:
+                    log.warning("failed to parse models JSON: %s", je)
+            
             _models_cache.update({"updated": time.time(), "status": resp.status_code,
-                                  "body": resp.content, "content_type": resp.headers.get("content-type", "application/json")})
-            return resp.status_code, _models_cache["content_type"], resp.content
+                                  "body": body_bytes, "content_type": resp.headers.get("content-type", "application/json")})
+            return resp.status_code, _models_cache["content_type"], body_bytes
     except Exception as e:
         log.warning("models fetch failed: %s", e)
         _models_retry_at = time.time() + 30
@@ -2114,6 +2218,10 @@ def config_warnings() -> list[str]:
     if UPSTREAM_API_KEY == "public":
         out.append("upstream_api_key is the shared literal 'public' — it is globally "
                    "rate-limited and usually pre-burned. Expect widespread 429s.")
+    if "opencode" not in UPSTREAM_UA.lower():
+        out.append(f"upstream_user_agent ('{UPSTREAM_UA}') does not contain 'opencode'. "
+                   "The upstream free tier gates on the User-Agent: every other UA gets "
+                   "an instant 429 regardless of egress IP or key.")
     if not PROBE_MODEL:
         out.append("probe_model is empty — lanes cannot be verified with a real completion.")
     if not RELAY_API_KEY:

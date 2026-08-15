@@ -16,6 +16,37 @@ Instead of getting blocked by `429 Too Many Requests` after exhausting your sing
 
 ---
 
+## 🔑 The thing that actually matters (v0.9)
+
+`opencode.ai/zen/v1` gates its free tier on **two** independent things: the egress IP's budget **and** the `User-Agent` header. The UA gate was the reason nothing in this project worked.
+
+Measured 2026-08-15, **one single proxy egress IP, one key, requests interleaved back-to-back** (`/tmp/uamatrix_proxy.py`):
+
+| `User-Agent` sent | Result |
+|---|---|
+| `opencode/1.0` · `opencode` · `OpenCode/1.0` · `opencode-ai/1.0` · `opencode/1.0 (linux; x64)` | **200 OK — 5/5** |
+| `python-httpx/0.27.0` · `curl/8.5.0` · `Mozilla/5.0 … Chrome/127` · `axios/1.7.2` · `Go-http-client/2.0` | **429 `FreeUsageLimitError` — 0/5** |
+| *(no UA header at all)* | `403 error code: 1010` (Cloudflare) |
+
+Any UA whose lowercase form contains `opencode` passes; everything else is refused instantly on an IP that answers 200 one second earlier. Up to v0.8.1 this relay sent a Chrome UA, so **every** request 429'd, the prober concluded every proxy was "burned", and the pool starved. The rotation machinery was never the problem.
+
+Consequences worth knowing:
+
+- **Rotation is still required.** Each IP does have a finite free budget; once spent, that IP 429s even with the correct UA. Correct UA + rotation is what gives sustained throughput.
+- `UPSTREAM_USER_AGENT` is a first-class setting, defaults to `opencode/1.0`, and is **rejected** (dashboard validation + startup warning) if it does not contain `opencode`.
+- A client's own UA is forwarded only when it already says `opencode`; anything else is rewritten, because forwarding it guarantees a 429. Your client can send whatever it likes.
+- The prober does a real 1-token completion again (v0.8.1 had reduced it to a `/models` reachability check — `/models` answers `200` from fully quota-burned IPs, so screening alone promoted dead lanes).
+- A 429 from a lane now **parks** that lane (`burn=True`). Before, the burned lane stayed warm and got picked again immediately — that is how a 1.4k-request run logged 15k failovers.
+
+Measured through the relay after the fix, client sending a deliberately wrong UA (`python-requests/2.31`, rewritten by the relay):
+
+```
+N=200  concurrency=8   wall=88.5s   codes={200: 200}
+p50=2.5s  p95=6.5s  max=14.8s   24,047 tokens   0 errors
+```
+
+---
+
 ## ⚡ What Problem Does This Solve?
 
 | Scenario | Without ip-relay | With ip-relay |

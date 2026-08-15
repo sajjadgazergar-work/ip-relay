@@ -910,6 +910,16 @@ footer.site-footer a { color: var(--text-dim); }
                 <datalist id="modelList"></datalist>
                 <span class="field-hint">Cheapest model on the upstream — used for every lane probe.</span>
               </div>
+
+              <div class="input-container" style="margin-top:12px;">
+                <label class="input-label" for="cfgUpstreamUA">Upstream User-Agent</label>
+                <input type="text" class="input-element" id="cfgUpstreamUA" name="upstream_user_agent"
+                       placeholder="opencode/1.0" spellcheck="false"
+                       style="font-family:var(--font-mono); font-size:11.5px;">
+                <span class="field-hint">Must contain <code>opencode</code>. The free tier gates on this
+                  header, not just the IP: every other User-Agent gets an instant 429 on the same IP
+                  and key.</span>
+              </div>
             </fieldset>
 
             <div class="slider-group">
@@ -1614,6 +1624,7 @@ async function loadSettings() {
       const upKey = String(s.upstream_api_key ?? '');
       setVal('cfgUpstreamKey', (upKey.includes('...') || upKey === '(none)') ? '' : upKey);
       setVal('cfgProbeModel', s.probe_model ?? '');
+      setVal('cfgUpstreamUA', s.upstream_user_agent ?? 'opencode/1.0');
       setVal('cfgPoolTarget', s.proxy_pool_target ?? 30); updateSlider('PoolTarget');
       setVal('cfgConcurrency', s.proxy_test_concurrency ?? 60); updateSlider('Concurrency');
       const ws = String(s.webshare_token ?? '');
@@ -1668,6 +1679,7 @@ async function saveSettings(e) {
     upstream_base_url: document.getElementById('cfgUpstreamUrl').value,
     upstream_api_key: document.getElementById('cfgUpstreamKey').value,
     probe_model: document.getElementById('cfgProbeModel').value,
+    upstream_user_agent: document.getElementById('cfgUpstreamUA').value,
     proxy_pool_target: parseInt(document.getElementById('cfgPoolTarget').value, 10),
     proxy_test_concurrency: parseInt(document.getElementById('cfgConcurrency').value, 10),
     webshare_token: document.getElementById('cfgWebshare').value,
