@@ -1,0 +1,22 @@
+[Unit]
+Description=Tor SOCKS proxy for ip-relay egress lanes (IsolateSOCKSAuth)
+After=network-online.target
+Wants=network-online.target
+# The relay degrades gracefully without tor (logs a config warning and uses
+# public proxy lanes only), so this is a Wants, not a Requires, on oc-rotator.
+
+[Service]
+Type=simple
+User=root
+# IsolateSOCKSAuth is the whole point: each distinct SOCKS username gets its own
+# circuit, hence its own exit IP. Without it every relay lane shares ONE exit.
+ExecStart=/usr/bin/tor -f /etc/tor/ip-relay-torrc
+Restart=always
+RestartSec=5
+# tor bootstraps in ~10-30s; don't let a slow consensus fetch look like a crash
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -9,3 +9,12 @@ __pycache__/
 settings.json
 lanes.json
 lanes.json.tmp
+
+# Burn memory is per-host measured state (which egress IPs this box has spent).
+# Useless and misleading on another machine — every host burns its own set.
+burned.json
+burned.json.tmp
+
+# Playwright verification screenshots — regenerate with
+# tools/verify_dashboard_v10.py, don't version 1.5MB of PNGs.
+artifacts/

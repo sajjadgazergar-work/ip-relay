@@ -736,6 +736,14 @@ footer.site-footer a { color: var(--text-dim); }
           <span class="stat-sub" id="cFailovers">0 failovers</span>
         </div>
       </div>
+
+      <div class="stats-row">
+        <div class="stat-pill" style="flex:1;">
+          <span class="stat-val" id="cSupplyVal" style="font-size:13px;">Egress supply</span>
+          <span class="stat-label">Tor circuits &amp; burn memory</span>
+          <span class="stat-sub" id="cSupply">—</span>
+        </div>
+      </div>
     </section>
 
     <!-- ══ Topology ══════════════════════════════════════════════ -->
@@ -1065,16 +1073,73 @@ footer.site-footer a { color: var(--text-dim); }
                   <div class="input-container">
                     <label class="input-label" for="cfgCooldownSec">Lane cooldown (s)</label>
                     <input type="number" class="input-element" id="cfgCooldownSec" name="lane_cooldown_sec"
-                           min="10" max="3600" step="1" value="90" oninput="updateApplyDisabled()"
+                           min="10" max="86400" step="1" value="3600" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgCooldownSec" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgCooldownSec" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
                     <label class="input-label" for="cfgRecoverSec">Lane recover (s)</label>
                     <input type="number" class="input-element" id="cfgRecoverSec" name="lane_recover_sec"
-                           min="30" max="7200" step="1" value="240" oninput="updateApplyDisabled()"
+                           min="30" max="86400" step="1" value="3600" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgRecoverSec" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgRecoverSec" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgLanePinCount">Pinned lanes (drain)</label>
+                    <input type="number" class="input-element" id="cfgLanePinCount" name="lane_pin_count"
+                           min="1" max="50" step="1" value="3" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgLanePinCount" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgLanePinCount" aria-live="polite"></span>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <details class="config-section">
+              <summary class="config-summary">Egress supply — Tor &amp; burn memory</summary>
+              <div class="config-body">
+                <p class="config-hint">
+                  Measured: a 429'd egress IP never recovers, and one live Tor exit serves 40+
+                  requests. So spent IPs are remembered instead of re-probed, and Tor circuits
+                  supply fresh exits on demand (1,384 exit IPs, ~65% usable vs ~2% for scraped lists).
+                </p>
+                <div class="input-grid">
+                  <div class="input-container">
+                    <label class="input-label" for="cfgTorEnabled">Tor egress lanes</label>
+                    <select class="input-element" id="cfgTorEnabled" name="tor_enabled"
+                            onchange="updateApplyDisabled()" style="font-family:var(--font-mono); font-size:11.5px;">
+                      <option value="true">enabled</option>
+                      <option value="false">disabled</option>
+                    </select>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgTorLanes">Tor circuit lanes</label>
+                    <input type="number" class="input-element" id="cfgTorLanes" name="tor_lanes"
+                           min="0" max="200" step="1" value="12" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgTorLanes" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgTorLanes" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgTorSocksPort">Tor SOCKS port</label>
+                    <input type="number" class="input-element" id="cfgTorSocksPort" name="tor_socks_port"
+                           min="1" max="65535" step="1" value="9150" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgTorSocksPort" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgTorSocksPort" aria-live="polite"></span>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgBurnMemory">Burn memory</label>
+                    <select class="input-element" id="cfgBurnMemory" name="burn_memory"
+                            onchange="updateApplyDisabled()" style="font-family:var(--font-mono); font-size:11.5px;">
+                      <option value="true">remember spent IPs</option>
+                      <option value="false">disabled (re-probe everything)</option>
+                    </select>
+                  </div>
+                  <div class="input-container">
+                    <label class="input-label" for="cfgBurnTtl">Burn TTL (s)</label>
+                    <input type="number" class="input-element" id="cfgBurnTtl" name="burn_ttl_sec"
+                           min="60" max="2592000" step="1" value="86400" oninput="updateApplyDisabled()"
+                           aria-describedby="errCfgBurnTtl" style="font-family:var(--font-mono); font-size:11.5px;">
+                    <span class="field-error" id="errCfgBurnTtl" aria-live="polite"></span>
                   </div>
                 </div>
               </div>
@@ -1640,8 +1705,16 @@ async function loadSettings() {
       setVal('cfgProbeTimeout', s.proxy_probe_timeout ?? 25);
       setVal('cfgRelayTimeout', s.relay_proxy_timeout ?? 40);
       setVal('cfgRelayAttempts', s.relay_attempts ?? 6);
-      setVal('cfgCooldownSec', s.lane_cooldown_sec ?? 90);
-      setVal('cfgRecoverSec', s.lane_recover_sec ?? 240);
+      setVal('cfgCooldownSec', s.lane_cooldown_sec ?? 3600);
+      setVal('cfgRecoverSec', s.lane_recover_sec ?? 3600);
+      setVal('cfgLanePinCount', s.lane_pin_count ?? 3);
+      // Tor + burn memory. Selects, not checkboxes: "enabled/disabled" reads
+      // unambiguously for settings that change where every request egresses.
+      setVal('cfgTorEnabled', (s.tor_enabled ?? false) ? 'true' : 'false');
+      setVal('cfgTorLanes', s.tor_lanes ?? 12);
+      setVal('cfgTorSocksPort', s.tor_socks_port ?? 9150);
+      setVal('cfgBurnMemory', (s.burn_memory ?? true) ? 'true' : 'false');
+      setVal('cfgBurnTtl', s.burn_ttl_sec ?? 86400);
       settingsHydrated = true;
       updateApplyDisabled();
       loadModelList();
@@ -1695,7 +1768,13 @@ async function saveSettings(e) {
     relay_proxy_timeout: num('cfgRelayTimeout'),
     relay_attempts: num('cfgRelayAttempts'),
     lane_cooldown_sec: num('cfgCooldownSec'),
-    lane_recover_sec: num('cfgRecoverSec')
+    lane_recover_sec: num('cfgRecoverSec'),
+    lane_pin_count: num('cfgLanePinCount'),
+    tor_enabled: document.getElementById('cfgTorEnabled').value === 'true',
+    tor_lanes: num('cfgTorLanes'),
+    tor_socks_port: num('cfgTorSocksPort'),
+    burn_memory: document.getElementById('cfgBurnMemory').value === 'true',
+    burn_ttl_sec: num('cfgBurnTtl')
   };
 
   const relayKeyVal = String(document.getElementById('cfgRelayKey').value).trim();
@@ -1909,6 +1988,22 @@ function updateTelemetry(data) {
   const tiersEl = document.getElementById('cTiers');
   if (tiersEl) tiersEl.textContent = (t.fast ?? 0) + ' fast · ' + (t.medium ?? 0) + ' med · ' + (t.slow ?? 0) + ' slow';
 
+  // Egress supply: Tor circuits and the spent-IP blocklist. These decide whether
+  // the pool can keep finding fresh IPs, so they belong on the main telemetry
+  // line rather than buried in the settings pane.
+  const tor = data.tor || {};
+  const burn = data.burn || {};
+  const supplyEl = document.getElementById('cSupply');
+  if (supplyEl) {
+    let torTxt;
+    if (!tor.enabled) torTxt = 'tor off';
+    else if (!tor.reachable) torTxt = 'tor UNREACHABLE';
+    else torTxt = 'tor ' + (tor.warm_lanes ?? 0) + '/' + (tor.lanes ?? 0)
+                 + ' · ' + (tor.rotations ?? 0) + ' rotations';
+    supplyEl.textContent = torTxt + ' · '
+      + (burn.enabled ? (burn.known_spent_ips ?? 0) + ' burned IPs' : 'burn off');
+  }
+
   const quota = data.quota || {};
   const pill = document.getElementById('statusPill');
   const txt = document.getElementById('statusText');
@@ -2087,8 +2182,12 @@ async function refreshPool() {
           : '';
         const ago = (ln.last_ok_ago != null && ln.last_ok_ago >= 0)
           ? ' <span style="opacity:.6">· ' + esc(formatDur(ln.last_ok_ago)) + ' ago</span>' : '';
+        // Tor lanes are the self-renewing supply; mark them so the operator can
+        // see at a glance whether traffic is riding circuits or public proxies.
+        const kindChip = (ln.kind && ln.kind !== 'proxy')
+          ? ' <span class="chip ' + (ln.kind === 'tor' ? 'ok' : 'warn') + '">' + esc(ln.kind) + '</span>' : '';
         html += '<tr' + (isNew && !REDUCED_MOTION ? ' class="row-new"' : '') + '>'
-          + '<td class="mono-cell">' + esc(addr) + '<br><span style="opacity:.5;font-size:10px">/24 ' + esc(ln.subnet || '') + '</span></td>'
+          + '<td class="mono-cell">' + esc(addr) + kindChip + '<br><span style="opacity:.5;font-size:10px">/24 ' + esc(ln.subnet || '') + '</span></td>'
           + '<td><span class="badge-proto">' + esc(ln.proto || '') + '</span></td>'
           + '<td><div class="score-bar-bg"><div class="score-bar-fill" style="width:' + pct + '%"></div></div>'
           + '<span class="mono-cell">' + pct + '%</span></td>'

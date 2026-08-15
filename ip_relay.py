@@ -58,7 +58,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-VERSION = "0.9.0"
+VERSION = "1.0.0"
 
 # ── settings (env as base, settings.json overlays; UI writes the file) ──
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "settings.json")
@@ -75,8 +75,8 @@ DEFAULTS = {
     "proxy_probe_timeout": 25,        # real-probe timeout (slow proxies OK)
     "relay_proxy_timeout": 40,        # per-attempt upstream timeout via proxy
     "relay_attempts": 6,              # lanes tried per client request (failover)
-    "lane_cooldown_sec": 90,          # how long a burned lane is parked
-    "lane_recover_sec": 240,          # parked lane re-probe interval
+    "lane_cooldown_sec": 3600,        # how long a burned lane is parked
+    "lane_recover_sec": 3600,         # parked lane re-probe interval
     "direct_lane": True,              # include the server's own IP as a lane (v0.8.1: on by default)
     "webshare_token": "",             # optional Webshare free-tier API token
     "allow_socks": True,              # use SOCKS4/5 sources (needs httpx[socks])
@@ -89,6 +89,28 @@ DEFAULTS = {
     # Anything containing "opencode" (case-insensitive) passes; everything else
     # gets an instant 429 regardless of IP or key.
     "upstream_user_agent": "opencode/1.0",
+    # ── v1.0: burned-IP memory ─────────────────────────────────────
+    # Measured 2026-08-15: a 429'd egress IP does NOT recover on a short timer.
+    # A 40-minute continuous poll of one burned IP returned 429 on all ~80
+    # attempts, and that IP had been refused for 8 days. So burn is effectively
+    # permanent, and the old behaviour (park 90s, re-probe, re-add from the
+    # scrape feeds next cycle) spent the entire probe budget re-testing corpses
+    # — measured ~200 wasted probes/hour on 10 Webshare IPs alone.
+    "burn_memory": True,              # remember burned IPs across scrape cycles
+    "burn_ttl_sec": 86400,            # how long an IP stays blocklisted (24h)
+    # ── v1.0: Tor as an egress source ──────────────────────────────
+    # Tor with IsolateSOCKSAuth gives one circuit (hence one exit IP) per
+    # distinct SOCKS username: arbitrarily many lanes, no signup, no cost.
+    # Measured against opencode: 14 circuits -> 14 distinct exits; 40 circuits
+    # -> 65% live (vs ~2% for scraped public lists); one live exit served 40/40
+    # consecutive requests; 1,384 distinct exit IPs available.
+    "tor_enabled": False,             # use Tor circuits as lanes
+    "tor_lanes": 12,                  # how many isolated circuits to maintain
+    "tor_socks_port": 9150,           # SocksPort of a tor with IsolateSOCKSAuth
+    # ── v1.0: pin-and-drain ────────────────────────────────────────
+    # A live exit survives 40+ requests, so spreading load thin re-pays the
+    # ~35% miss cost on every request. Pin a few proven lanes and drain them.
+    "lane_pin_count": 3,              # proven lanes kept hot for traffic
 }
 settings: dict = dict(DEFAULTS)
 
@@ -121,6 +143,10 @@ SETTING_BOUNDS: dict[str, tuple[int, int]] = {
     "lane_recover_sec": (30, 86400),
     "lane_max_inflight": (1, 32),
     "max_lanes_per_subnet": (0, 100),
+    "burn_ttl_sec": (60, 2592000),
+    "tor_lanes": (0, 200),
+    "tor_socks_port": (1, 65535),
+    "lane_pin_count": (1, 50),
 }
 
 # Named upstream profiles: base URL + probe model in one pick, so a new user
@@ -176,6 +202,12 @@ LANE_MAX_INFLIGHT = DEFAULTS["lane_max_inflight"]
 MAX_LANES_PER_SUBNET = DEFAULTS["max_lanes_per_subnet"]
 ADAPTIVE_CONCURRENCY = DEFAULTS["adaptive_concurrency"]
 PERSIST_LANES = DEFAULTS["persist_lanes"]
+BURN_MEMORY = DEFAULTS["burn_memory"]
+BURN_TTL_SEC = DEFAULTS["burn_ttl_sec"]
+TOR_ENABLED = DEFAULTS["tor_enabled"]
+TOR_LANES = DEFAULTS["tor_lanes"]
+TOR_SOCKS_PORT = DEFAULTS["tor_socks_port"]
+LANE_PIN_COUNT = DEFAULTS["lane_pin_count"]
 
 # Adaptive probe concurrency. A fixed number is wrong on every link: 60 melts
 # an Iranian residential CPE's NAT table (the root cause of the "0 warm
@@ -213,6 +245,12 @@ def load_settings() -> None:
         "adaptive_concurrency": os.environ.get("ADAPTIVE_CONCURRENCY", "1") in ("1", "true", "yes"),
         "persist_lanes": os.environ.get("PERSIST_LANES", "1") in ("1", "true", "yes"),
         "upstream_user_agent": str(os.environ.get("UPSTREAM_USER_AGENT") or DEFAULTS["upstream_user_agent"]).strip(),
+        "burn_memory": os.environ.get("BURN_MEMORY", "1") in ("1", "true", "yes"),
+        "burn_ttl_sec": int(os.environ.get("BURN_TTL_SEC", DEFAULTS["burn_ttl_sec"])),
+        "tor_enabled": os.environ.get("TOR_ENABLED", "0") in ("1", "true", "yes"),
+        "tor_lanes": int(os.environ.get("TOR_LANES", DEFAULTS["tor_lanes"])),
+        "tor_socks_port": int(os.environ.get("TOR_SOCKS_PORT", DEFAULTS["tor_socks_port"])),
+        "lane_pin_count": int(os.environ.get("LANE_PIN_COUNT", DEFAULTS["lane_pin_count"])),
     }
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as f:
@@ -250,6 +288,7 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     global DIRECT_LANE, WEBSHARE_TOKEN, ALLOW_SOCKS
     global LANE_MAX_INFLIGHT, MAX_LANES_PER_SUBNET, ADAPTIVE_CONCURRENCY, PERSIST_LANES
     global UPSTREAM_API_KEYS, UPSTREAM_UA
+    global BURN_MEMORY, BURN_TTL_SEC, TOR_ENABLED, TOR_LANES, TOR_SOCKS_PORT, LANE_PIN_COUNT
     old_base, old_key = UPSTREAM_BASE_URL, UPSTREAM_API_KEY
     for k, v in new.items():
         if k in DEFAULTS:
@@ -275,6 +314,12 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     MAX_LANES_PER_SUBNET = max(0, int(settings["max_lanes_per_subnet"]))
     ADAPTIVE_CONCURRENCY = bool(settings["adaptive_concurrency"])
     PERSIST_LANES = bool(settings["persist_lanes"])
+    BURN_MEMORY = bool(settings.get("burn_memory", DEFAULTS["burn_memory"]))
+    BURN_TTL_SEC = max(60, int(settings.get("burn_ttl_sec", DEFAULTS["burn_ttl_sec"])))
+    TOR_ENABLED = bool(settings.get("tor_enabled", DEFAULTS["tor_enabled"]))
+    TOR_LANES = max(0, int(settings.get("tor_lanes", DEFAULTS["tor_lanes"])))
+    TOR_SOCKS_PORT = int(settings.get("tor_socks_port", DEFAULTS["tor_socks_port"]))
+    LANE_PIN_COUNT = max(1, int(settings.get("lane_pin_count", DEFAULTS["lane_pin_count"])))
     UPSTREAM_UA = str(settings.get("upstream_user_agent") or DEFAULTS["upstream_user_agent"]).strip() \
         or str(DEFAULTS["upstream_user_agent"])
     if "opencode" not in UPSTREAM_UA.lower():
@@ -343,9 +388,17 @@ def mask_key(k: str) -> str:
 
 
 def _display_addr(a: str) -> str:
-    """Never surface proxy credentials: 'user:pass@ip:port' -> 'ip:port'."""
+    """Never surface proxy credentials: 'user:pass@ip:port' -> 'ip:port'.
+
+    Tor lanes would otherwise all render as '127.0.0.1:9150', which is useless
+    in the dashboard — every circuit would look like the same lane. Show the
+    circuit identity instead, since that IS the distinguishing egress.
+    """
     if a == "":
         return "direct"
+    if a.startswith(TOR_LANE_PREFIX):
+        parsed = tor_slot_of(a)
+        return f"tor#{parsed[0]}.g{parsed[1]}" if parsed else "tor"
     return a.split("@", 1)[-1] if "@" in a else a
 
 
@@ -452,6 +505,241 @@ app = FastAPI(title="ip-relay")
 # EGRESS ENGINE
 # ══════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════
+# BURN MEMORY — the blocklist of spent egress IPs
+# ══════════════════════════════════════════════════════════════════
+#
+# Why this exists (measured 2026-08-15, not assumed):
+#
+#   * A 429'd egress IP does not come back. One IP was polled continuously for
+#     40 minutes — ~80 attempts, zero 200s — and had already been refused for 8
+#     days. Verified with a live key while other lanes were returning 200, so
+#     the key was fine and the IP was what was refused.
+#   * The scrape feeds re-serve the same dead addresses every cycle. The 10
+#     Webshare free IPs alone were re-probed ~20 times each in one hour: ~200
+#     probes spent on addresses that will never work again.
+#
+# So burn is remembered on disk, keyed on the IP (never ip:port — the quota
+# follows the address, and the same host shows up on many ports across feeds),
+# and consulted at two choke points: candidate intake and probe dispatch. That
+# redirects the probe budget at addresses that could plausibly be live.
+
+BURNED_FILE = os.environ.get("BURNED_FILE", "burned.json")
+
+# ip -> {"at": epoch, "reason": str, "hits": int}
+BURNED: dict[str, dict] = {}
+BURN_STATS = {"blocked_intake": 0, "blocked_probe": 0, "recorded": 0, "expired": 0}
+
+
+def _ip_of(addr: str) -> str:
+    """Bare IP from 'user:pass@ip:port', 'ip:port', or a synthetic lane addr."""
+    if not addr:
+        return ""
+    return addr.split("@")[-1].split(":")[0]
+
+
+def is_burned(addr_or_ip: str) -> bool:
+    """True when this egress address is a known-spent IP still inside its TTL.
+
+    Tor lanes are exempt: their addr points at the local SOCKS port, so the IP
+    would be 127.0.0.1 for every circuit — blocklisting that would kill the
+    whole Tor provider on the first 429. Circuit rotation is how a burned Tor
+    exit is discarded (see tor_rotate_lane).
+    """
+    if not BURN_MEMORY or not addr_or_ip:
+        return False
+    if addr_or_ip.startswith(TOR_LANE_PREFIX):
+        return False
+    ip = _ip_of(addr_or_ip)
+    if not ip or ip in ("127.0.0.1", "localhost"):
+        return False
+    rec = BURNED.get(ip)
+    if not rec:
+        return False
+    if time.time() - rec.get("at", 0) > BURN_TTL_SEC:
+        BURNED.pop(ip, None)
+        BURN_STATS["expired"] += 1
+        return False
+    return True
+
+
+def mark_burned(addr: str, reason: str = "429") -> None:
+    """Remember that this egress IP's free-tier budget is spent."""
+    if not BURN_MEMORY or not addr:
+        return
+    if addr.startswith(TOR_LANE_PREFIX):
+        return          # rotate the circuit instead; see tor_rotate_lane
+    ip = _ip_of(addr)
+    if not ip or ip in ("127.0.0.1", "localhost"):
+        return
+    rec = BURNED.get(ip)
+    if rec:
+        rec["hits"] = rec.get("hits", 1) + 1
+        rec["at"] = time.time()
+        rec["reason"] = reason
+    else:
+        BURNED[ip] = {"at": time.time(), "reason": reason, "hits": 1}
+        BURN_STATS["recorded"] += 1
+
+
+def prune_burned() -> int:
+    """Drop expired entries so the file and the dict stay bounded."""
+    now = time.time()
+    dead = [ip for ip, r in BURNED.items() if now - r.get("at", 0) > BURN_TTL_SEC]
+    for ip in dead:
+        BURNED.pop(ip, None)
+    BURN_STATS["expired"] += len(dead)
+    return len(dead)
+
+
+def save_burned() -> int:
+    if not BURN_MEMORY:
+        return 0
+    try:
+        tmp = BURNED_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"saved": time.time(), "ips": BURNED}, f)
+        os.replace(tmp, BURNED_FILE)
+        return len(BURNED)
+    except Exception as e:
+        log.warning("could not save burn list: %s", e)
+        return 0
+
+
+def load_burned() -> int:
+    if not BURN_MEMORY:
+        return 0
+    try:
+        with open(BURNED_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        ips = data.get("ips", {})
+        now = time.time()
+        loaded = 0
+        for ip, rec in ips.items():
+            if not isinstance(rec, dict):
+                continue
+            if now - float(rec.get("at", 0)) > BURN_TTL_SEC:
+                continue
+            BURNED[ip] = rec
+            loaded += 1
+        if loaded:
+            log.info("burn memory: %d known-spent IPs loaded (ttl=%ds)", loaded, BURN_TTL_SEC)
+        return loaded
+    except FileNotFoundError:
+        return 0
+    except Exception as e:
+        log.warning("could not load burn list: %s", e)
+        return 0
+
+
+# ══════════════════════════════════════════════════════════════════
+# TOR EGRESS PROVIDER
+# ══════════════════════════════════════════════════════════════════
+#
+# Measured 2026-08-15 against opencode.ai/zen/v1:
+#
+#   14 isolated circuits -> 14 DISTINCT exit IPs (zero repeats)
+#   40 isolated circuits -> 26x200 / 14x429  =  65% live
+#                           p50 2128ms, p95 3037ms on success
+#   one live exit        -> 40/40 consecutive requests (twice, independently)
+#   supply              -> 3,224 exit relays / 1,384 distinct exit IPs
+#
+# For comparison the scraped public-proxy feeds yield ~2% (16 usable out of
+# 1,040 probed). Tor is ~30x better per probe, at equal latency, and its supply
+# renews itself instead of churning.
+#
+# Mechanism: tor's `IsolateSOCKSAuth` binds a circuit to the SOCKS *username*,
+# so socks5://<name>:x@127.0.0.1:9150 is a private egress per name. httpx takes
+# the proxy per-client, so this needs no new transport code and is safe under
+# concurrency (verified: 10 parallel circuits, no cross-talk).
+#
+# Rotation is the important part: because a burned exit never recovers, a 429 on
+# a Tor lane must not park it — it must change the circuit name, which yields a
+# brand-new exit IP. That is what makes discovery self-renewing.
+
+TOR_LANE_PREFIX = "tor-"
+_tor_rotations = 0
+
+
+def tor_lane_addr(slot: int, generation: int = 0) -> str:
+    """Synthetic lane address for Tor slot `slot` at circuit `generation`.
+
+    The username encodes slot+generation, so bumping the generation forces tor
+    to build a fresh circuit (new exit IP) while keeping the slot identity.
+    """
+    return f"{TOR_LANE_PREFIX}{slot}g{generation}:x@127.0.0.1:{TOR_SOCKS_PORT}"
+
+
+def tor_slot_of(addr: str) -> tuple[int, int] | None:
+    """(slot, generation) from a Tor lane addr, or None if not a Tor lane."""
+    if not addr.startswith(TOR_LANE_PREFIX):
+        return None
+    try:
+        name = addr.split(":", 1)[0][len(TOR_LANE_PREFIX):]
+        slot_s, gen_s = name.split("g", 1)
+        return int(slot_s), int(gen_s)
+    except Exception:
+        return None
+
+
+def tor_available() -> bool:
+    """Is a tor SOCKS port actually listening? Cheap, synchronous, no traffic."""
+    import socket as _socket
+    try:
+        with _socket.create_connection(("127.0.0.1", TOR_SOCKS_PORT), timeout=1.5):
+            return True
+    except Exception:
+        return False
+
+
+def tor_rotate_lane(ln: "Lane") -> str | None:
+    """Replace a burned Tor lane with a fresh circuit in the same slot.
+
+    Returns the new lane key, or None when `ln` is not a Tor lane. The old lane
+    is removed outright rather than parked: its exit is spent, and parking would
+    just re-probe a dead address on the recover loop.
+    """
+    global _tor_rotations
+    parsed = tor_slot_of(ln.addr)
+    if parsed is None:
+        return None
+    slot, gen = parsed
+    POOL.lanes.pop(f"{ln.proto}://{ln.addr}", None)
+    new_addr = tor_lane_addr(slot, gen + 1)
+    fresh = Lane(new_addr, "socks5")
+    fresh.score = 0.5
+    key = f"socks5://{new_addr}"
+    POOL.lanes[key] = fresh
+    _tor_rotations += 1
+    log.info("tor: rotated slot %d to generation %d (new exit circuit)", slot, gen + 1)
+    return key
+
+
+def tor_ensure_lanes() -> int:
+    """Keep TOR_LANES circuit slots present in the pool. Idempotent.
+
+    Lanes start unproven (score 0.5) and are confirmed by the normal probe path,
+    which is what filters the ~35% of exits whose budget is already spent.
+    """
+    if not TOR_ENABLED:
+        return 0
+    if not tor_available():
+        return 0
+    have = {tor_slot_of(ln.addr)[0] for ln in POOL.lanes.values()
+            if ln.addr.startswith(TOR_LANE_PREFIX) and tor_slot_of(ln.addr)}
+    added = 0
+    for slot in range(max(0, TOR_LANES)):
+        if slot in have:
+            continue
+        addr = tor_lane_addr(slot, 0)
+        POOL.lanes[f"socks5://{addr}"] = Lane(addr, "socks5")
+        added += 1
+    if added:
+        log.info("tor: added %d circuit lanes (target=%d, socks=127.0.0.1:%d)",
+                 added, TOR_LANES, TOR_SOCKS_PORT)
+    return added
+
+
 class Lane:
     """One egress route (a proxy, or the direct lane). Carries health score.
 
@@ -495,9 +783,18 @@ class Lane:
     @property
     def subnet(self) -> str:
         """The /24 this lane lives in. Upstream per-IP limits are frequently
-        enforced per-subnet, so /24 is the real unit of pool capacity."""
+        enforced per-subnet, so /24 is the real unit of pool capacity.
+
+        Tor lanes all share 127.0.0.1, but each circuit is an INDEPENDENT exit
+        in a different AS — so they must not collapse into one subnet bucket or
+        max_lanes_per_subnet would cap the whole Tor provider at 3 lanes. Each
+        circuit slot therefore reports its own synthetic subnet.
+        """
         if not self.addr:
             return "direct"
+        if self.addr.startswith(TOR_LANE_PREFIX):
+            parsed = tor_slot_of(self.addr)
+            return f"tor-{parsed[0]}" if parsed else "tor"
         host = self.addr.split("@")[-1].split(":")[0]
         parts = host.split(".")
         return ".".join(parts[:3]) if len(parts) == 4 else host
@@ -528,6 +825,19 @@ class Lane:
         self.lat_ms = lat_ms
         self.score = min(1.0, self.score * 0.6 + 0.4)   # reward
         self.parked_until = 0.0
+        self.consec_fails = 0
+
+    def mark_alive(self, lat_ms: float):
+        """Reachability-only success (GET /models), NOT a completion.
+
+        This must never touch `ok`. `/models` answers 200 even from an egress IP
+        whose completion quota is fully spent — measured — so counting it as a
+        success would mark a dead lane "proven" and pin traffic to it (see
+        _pick_lane). Refresh liveness and latency, leave the proof alone.
+        """
+        self.last_probe = time.time()
+        self.lat_ms = lat_ms
+        self.score = min(1.0, self.score * 0.8 + 0.1)   # mild reward
         self.consec_fails = 0
 
     def mark_fail(self, burn: bool = False):
@@ -675,6 +985,10 @@ def _note_lane_429(addr: str) -> None:
     hammering in that state just burns fresh IPs for nothing.
     """
     now = time.time()
+    # Burn memory: this address is spent for the TTL. Measured — it does not
+    # recover on a 90s cooldown, so remembering it is what stops the prober
+    # re-testing the same corpses every scrape cycle.
+    mark_burned(addr, "relay-429")
     w = QUOTA_STATE["_429_window"]
     w.append((now, addr))
     w[:] = [(t, a) for t, a in w if now - t <= QUOTA_WINDOW_SEC]
@@ -813,7 +1127,12 @@ def publish(kind: str, data: dict) -> None:
 def save_lanes() -> int:
     if not PERSIST_LANES:
         return 0
-    keep = [ln.to_dict() for ln in POOL.lanes.values() if ln.addr and ln.score > 0.25]
+    # Tor lanes are deliberately excluded: a circuit is bound to a running tor
+    # process and its exit is gone after a restart, so persisting them would
+    # re-seed dead circuits as priority candidates. tor_ensure_lanes() recreates
+    # the slots on boot instead.
+    keep = [ln.to_dict() for ln in POOL.lanes.values()
+            if ln.addr and ln.score > 0.25 and not ln.addr.startswith(TOR_LANE_PREFIX)]
     try:
         tmp = LANES_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -848,6 +1167,11 @@ def load_lanes() -> int:
             continue
         if not ln.addr or ln.score <= 0.25:
             continue
+        if ln.addr.startswith(TOR_LANE_PREFIX):
+            continue          # stale circuit from a previous tor process
+        if is_burned(ln.addr):
+            BURN_STATS["blocked_intake"] += 1
+            continue          # remembered lane whose IP has since burned
         POOL.priority_candidates[f"{ln.proto}://{ln.addr}"] = now
         n += 1
     if n:
@@ -860,6 +1184,8 @@ async def lane_persist_loop() -> None:
         await asyncio.sleep(30)
         try:
             save_lanes()
+            prune_burned()
+            save_burned()
         except Exception as e:
             log.warning("lane persist loop error: %s", e)
 
@@ -947,6 +1273,12 @@ async def _fetch_sources() -> None:
                     key = f"{proto}://{addr}"
                     if key in POOL.lanes or key in POOL.candidates or key in POOL.tried:
                         continue
+                    # Known-spent IP: the feeds re-serve these every cycle and
+                    # they never recover. Refusing them at intake is what frees
+                    # the probe budget for addresses that could be live.
+                    if is_burned(addr):
+                        BURN_STATS["blocked_intake"] += 1
+                        continue
                     if len(POOL.candidates) >= MAX_CANDIDATES:
                         break
                     POOL.candidates[key] = now
@@ -974,6 +1306,9 @@ async def _fetch_sources() -> None:
                             continue
                         key = f"{proto}://{addr}"
                         if key in POOL.lanes or key in POOL.candidates or key in POOL.tried:
+                            continue
+                        if is_burned(addr):
+                            BURN_STATS["blocked_intake"] += 1
                             continue
                         if len(POOL.candidates) >= MAX_CANDIDATES:
                             break
@@ -1014,6 +1349,9 @@ async def _fetch_sources() -> None:
                         key = f"http://{addr}"
                         if key in POOL.lanes or key in POOL.candidates or key in POOL.priority_candidates or key in POOL.tried:
                             continue
+                        if is_burned(addr):
+                            BURN_STATS["blocked_intake"] += 1
+                            continue
                         POOL.priority_candidates[key] = now
                         added += 1
                 except Exception:
@@ -1051,6 +1389,13 @@ async def _screen(c: httpx.AsyncClient) -> bool:
 
 async def _probe_candidate(key: str) -> Lane | None:
     proto, addr = key.split("://", 1)
+    # Second choke point for burn memory: a candidate can enter the reservoir
+    # before its IP is burned (e.g. it burned while queued), so re-check at
+    # dispatch. Cheap dict lookup vs a wasted two-stage upstream probe.
+    if is_burned(addr):
+        BURN_STATS["blocked_probe"] += 1
+        _LAST_PROBE_ERR[key] = "burned-known"
+        return None
     # httpx has no socks4 transport — everything socks* is dialled as socks5.
     scheme = "socks5" if proto.startswith("socks") else "http" if proto in ("http", "https") else proto
     proxy_url = f"{scheme}://{addr}"
@@ -1089,9 +1434,12 @@ async def _probe_candidate(key: str) -> Lane | None:
         if r.status_code == 429:
             # This egress IP's free quota is already spent (shared public proxies
             # usually are). Not our key's problem — drop the candidate, keep going.
+            # Remember it: measured, a burned IP does not come back, and the
+            # feeds will re-serve this same address on the next scrape cycle.
             _LAST_PROBE_ERR[key] = "burned"
             STATS["probes_burned"] += 1
-            log.info("Prober: %s is quota-burned (429) — dropped", _display_addr(addr))
+            mark_burned(addr, "probe-429")
+            log.info("Prober: %s is quota-burned (429) — dropped + blocklisted", _display_addr(addr))
             return None
 
         _LAST_PROBE_ERR[key] = "http"
@@ -1288,6 +1636,11 @@ async def _recover_parked() -> None:
                     ln.last_probe = now
                     if r.status_code == 429 and is_quota_429(r.content, 429):
                         _note_lane_429(ln.addr)
+                        # Tor lane: rotate the circuit instead of re-parking a
+                        # spent exit. Public lane: _note_lane_429 blocklisted the
+                        # IP, and _drop_dead will retire the lane.
+                        if ln.addr.startswith(TOR_LANE_PREFIX):
+                            tor_rotate_lane(ln)
                         return  # this lane's IP is burned; keep parked, don't re-burn
                     if r.status_code == 200 and _looks_like_completion(r.content):
                         _note_quota_ok()
@@ -1311,12 +1664,21 @@ async def _recover_parked() -> None:
 
 async def _drop_dead() -> None:
     """Prune lanes that have never succeeded and have exhausted retries, and
-    stale tried markers, so state doesn't grow forever."""
+    stale tried markers, so state doesn't grow forever.
+
+    v1.0 also retires lanes whose IP is on the burn list. Previously a burned
+    public lane sat parked forever, getting re-probed by the recover loop on a
+    cooldown that measurement showed never helps — the IP is spent. Retiring it
+    keeps the pool honest about its real capacity.
+    """
     now = time.time()
     dead = [a for a, ln in POOL.lanes.items()
             if ln.addr != "" and ln.ok == 0 and ln.probe_tries > 4 and now - ln.last_probe > 1800]
-    for a in dead:
+    burned_lanes = [a for a, ln in POOL.lanes.items() if ln.addr and is_burned(ln.addr)]
+    for a in dead + burned_lanes:
         POOL.lanes.pop(a, None)
+    if burned_lanes:
+        log.info("pool: retired %d lanes on known-spent IPs", len(burned_lanes))
     stale = [k for k, ts in POOL.tried.items() if now - ts > 3600]
     for k in stale:
         POOL.tried.pop(k, None)
@@ -1345,7 +1707,10 @@ async def _revalidate_warm() -> None:
                     r = await c.get(f"{UPSTREAM_BASE_URL}/models", headers=upstream_headers())
                     ln.last_probe = now
                     if r.status_code in (200, 401, 403, 404, 405):
-                        ln.mark_ok((time.time() - t0) * 1000)
+                        # Reachability only — see mark_alive. Counting this as a
+                        # completion success would let a quota-dead lane look
+                        # proven and attract pinned traffic.
+                        ln.mark_alive((time.time() - t0) * 1000)
                     else:
                         ln.mark_fail(burn=True)
             except Exception:
@@ -1411,6 +1776,7 @@ async def pool_manager() -> None:
                 if not POOL.candidates:
                     await _fetch_sources()
             _ensure_direct_lane()
+            tor_ensure_lanes()
         except Exception as e:
             log.warning("pool manager error: %s", e)
         await asyncio.sleep(6)
@@ -1488,10 +1854,34 @@ _lane_cursor = 0
 
 
 def _pick_lane(lanes: list[Lane]) -> Lane:
-    """Rotate the FIRST pick through the top min(3, len) latency-ranked lanes,
-    so concurrent requests spread across the best lanes instead of all
-    hammering lanes[0]. Subsequent failover picks use lanes[0] of the rest."""
+    """Pin-and-drain: prefer a small set of PROVEN lanes and keep using them.
+
+    v0.9 rotated across the top 3 latency-ranked lanes regardless of whether
+    they had ever served a request. That is the wrong shape for this upstream:
+    measured, a live egress IP serves 40+ consecutive requests before its budget
+    is spent, while ~35% of fresh candidates are already burned on first use. So
+    spreading traffic thin re-pays the miss cost over and over, whereas draining
+    a known-good lane amortises one probe across dozens of requests.
+
+    Ranking, in order:
+      1. lanes that have actually succeeded (ok > 0), best score first — these
+         are the pins, and they get the traffic until they burn;
+      2. unproven lanes, fastest first — used only when no pin has capacity,
+         which is also how new lanes get their first real request.
+
+    Within the pin set we still round-robin, because a single lane has
+    LANE_MAX_INFLIGHT capacity and concurrent requests must not queue behind it.
+    """
     global _lane_cursor
+    if not lanes:
+        raise IndexError("no lanes")
+    proven = [ln for ln in lanes if ln.ok > 0]
+    if proven:
+        proven.sort(key=lambda ln: (-ln.score, ln.lat_ms if ln.lat_ms else 8000))
+        pins = proven[: max(1, min(LANE_PIN_COUNT, len(proven)))]
+        lane = pins[_lane_cursor % len(pins)]
+        _lane_cursor += 1
+        return lane
     top = lanes[: min(3, len(lanes))]
     lane = top[_lane_cursor % len(top)]
     _lane_cursor += 1
@@ -1554,6 +1944,11 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                 # a burned IP actually leaves rotation.
                 lane.mark_fail(burn=True)
                 _note_lane_429(lane.addr)
+                # v1.0: a Tor lane is not parked — its exit is spent, but the
+                # slot can get a brand-new exit by changing the circuit name.
+                # That is the self-renewing part of the Tor provider.
+                if lane.addr.startswith(TOR_LANE_PREFIX):
+                    tor_rotate_lane(lane)
                 STATS["failovers"] += 1
                 last_err = (429, body)
                 if i >= (attempts - 1) or time.time() > deadline or QUOTA_STATE["exhausted"]:
@@ -1739,6 +2134,8 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                 # Same as the non-streaming path: burn, don't just demote.
                 lane.mark_fail(burn=True)
                 _note_lane_429(lane.addr)
+                if lane.addr.startswith(TOR_LANE_PREFIX):
+                    tor_rotate_lane(lane)
                 STATS["failovers"] += 1
                 last_err = (429, b"")
                 await resp.aclose()
@@ -2166,10 +2563,25 @@ async def lifespan(_app: FastAPI):
     for line in config_warnings():
         log.warning("CONFIG: %s", line)
 
-    # 3. Re-seed remembered lanes so a restart is not a cold start
+    # 3. Re-seed remembered lanes so a restart is not a cold start.
+    #    Burn memory loads FIRST so the re-seed can filter out lanes whose IPs
+    #    have burned since the last run instead of re-probing them.
+    load_burned()
     restored = load_lanes()
     if restored:
         log.info("warm-start: %d remembered lanes queued for fast revalidation", restored)
+
+    # 3b. Tor egress. Enabled by config; verified by an actual connect to the
+    #     SOCKS port, so a misconfigured port degrades to "no tor lanes" with a
+    #     clear warning instead of silently adding lanes that can never dial.
+    if TOR_ENABLED:
+        if tor_available():
+            added = tor_ensure_lanes()
+            log.info("tor: enabled, %d circuit lanes on 127.0.0.1:%d", added, TOR_SOCKS_PORT)
+        else:
+            log.warning("tor_enabled=true but nothing is listening on 127.0.0.1:%d — "
+                        "no tor lanes will be created. Start tor with "
+                        "'SocksPort %d IsolateSOCKSAuth'.", TOR_SOCKS_PORT, TOR_SOCKS_PORT)
 
     # Background workers are skipped when IP_RELAY_NO_BACKGROUND=1 so tests (and
     # anyone importing the app for inspection) don't start scraping the internet.
@@ -2200,6 +2612,9 @@ async def lifespan(_app: FastAPI):
         n = save_lanes()
         if n:
             log.info("shutdown: persisted %d lanes to %s", n, LANES_FILE)
+        b = save_burned()
+        if b:
+            log.info("shutdown: persisted %d burned IPs to %s", b, BURNED_FILE)
         for t in tasks:
             t.cancel()
 
@@ -2240,6 +2655,20 @@ def config_warnings() -> list[str]:
     if LANE_MAX_INFLIGHT > 4:
         out.append(f"lane_max_inflight is {LANE_MAX_INFLIGHT}: free proxies typically survive "
                    "1–2 concurrent requests before dropping.")
+    if TOR_ENABLED and not tor_available():
+        out.append(f"tor_enabled is on but nothing is listening on 127.0.0.1:{TOR_SOCKS_PORT}. "
+                   f"Start tor with 'SocksPort {TOR_SOCKS_PORT} IsolateSOCKSAuth' — without "
+                   "IsolateSOCKSAuth every lane shares ONE circuit and one exit IP, which "
+                   "defeats the entire point.")
+    if not BURN_MEMORY:
+        out.append("burn_memory is off. Measured: a 429'd egress IP does not recover (40 min of "
+                   "continuous polling, zero successes), and the scrape feeds re-serve the same "
+                   "dead addresses every cycle — so the prober will keep spending its budget on "
+                   "known-spent IPs.")
+    if LANE_COOLDOWN_SEC < 600:
+        out.append(f"lane_cooldown_sec is {LANE_COOLDOWN_SEC}s. A burned IP was measured 429ing "
+                   "for 40+ minutes straight (and 8 days on one host), so a short cooldown just "
+                   "re-probes corpses. 3600s or more is realistic.")
     return out
 
 
@@ -2431,6 +2860,15 @@ async def api_stats(request: Request):
     return {"version": VERSION, "uptime_sec": int(time.time() - STATS["started"]),
             "pool": s, "stats": STATS, "settings": public_settings(),
             "adaptive": ADAPT, "metrics": metrics_window(300),
+            "burn": {"known_spent_ips": len(BURNED), "ttl_sec": BURN_TTL_SEC,
+                     "enabled": BURN_MEMORY, **BURN_STATS},
+            "tor": {"enabled": TOR_ENABLED, "socks_port": TOR_SOCKS_PORT,
+                    "reachable": tor_available() if TOR_ENABLED else False,
+                    "target_lanes": TOR_LANES, "rotations": _tor_rotations,
+                    "lanes": sum(1 for ln in POOL.lanes.values()
+                                 if ln.addr.startswith(TOR_LANE_PREFIX)),
+                    "warm_lanes": sum(1 for ln in POOL.warm_lanes()
+                                      if ln.addr.startswith(TOR_LANE_PREFIX))},
             "quota": {"exhausted": QUOTA_STATE["exhausted"],
                       "resumes_in": max(0, int(QUOTA_STATE["backoff_until"] - time.time()))}}
 
@@ -2452,6 +2890,8 @@ async def api_pool(request: Request):
              "lat_ms": round(ln.lat_ms), "ok": ln.ok, "fails": ln.fails,
              "tier": ln.tier, "subnet": ln.subnet, "inflight": ln.inflight,
              "capacity": max(1, LANE_MAX_INFLIGHT),
+             "kind": "tor" if ln.addr.startswith(TOR_LANE_PREFIX) else ("direct" if not ln.addr else "proxy"),
+             "proven": ln.ok > 0,
              "age_sec": int(now - ln.created),
              "last_ok_ago": int(now - ln.last_ok) if ln.last_ok else -1}
             for ln in all_warm[offset:offset + limit]]
@@ -2582,6 +3022,55 @@ async def api_refresh(request: Request):
     POOL.last_fetch = 0.0
     await _fetch_sources()
     return {"queue": len(POOL.candidates), "sources_ok": POOL.sources_ok}
+
+
+@app.get("/api/burned")
+async def api_burned(request: Request):
+    """The blocklist of spent egress IPs, newest first.
+
+    Operator-facing: without this the burn list is invisible and a wrongly
+    blocklisted IP would be impossible to diagnose.
+    """
+    if not _check_relay_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    now = time.time()
+    try:
+        limit = max(1, min(1000, int(request.query_params.get("limit", 100))))
+    except ValueError:
+        limit = 100
+    rows = sorted(BURNED.items(), key=lambda kv: -kv[1].get("at", 0))[:limit]
+    return {
+        "enabled": BURN_MEMORY,
+        "ttl_sec": BURN_TTL_SEC,
+        "total": len(BURNED),
+        "stats": BURN_STATS,
+        "ips": [{"ip": ip, "reason": r.get("reason", ""), "hits": r.get("hits", 1),
+                 "age_sec": int(now - r.get("at", 0)),
+                 "expires_in": max(0, int(BURN_TTL_SEC - (now - r.get("at", 0))))}
+                for ip, r in rows],
+    }
+
+
+@app.post("/api/burned/clear")
+async def api_burned_clear(request: Request):
+    """Forget the burn list (or one IP via ?ip=...).
+
+    Needed because burn is a heuristic: if the upstream ever resets its per-IP
+    accounting, or an IP is blocklisted for the wrong reason, the operator has
+    to be able to give it another chance without editing JSON by hand.
+    """
+    if not _check_relay_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    ip = request.query_params.get("ip", "").strip()
+    if ip:
+        existed = BURNED.pop(ip, None) is not None
+        save_burned()
+        return {"cleared": 1 if existed else 0, "ip": ip, "remaining": len(BURNED)}
+    n = len(BURNED)
+    BURNED.clear()
+    save_burned()
+    log.info("burn memory cleared by operator (%d IPs forgotten)", n)
+    return {"cleared": n, "remaining": 0}
 
 
 @app.get("/v1/models")

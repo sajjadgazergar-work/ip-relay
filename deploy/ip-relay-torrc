@@ -1,0 +1,23 @@
+# Tor config for ip-relay egress lanes.
+#
+# IsolateSOCKSAuth is the mechanism the whole Tor provider rests on: tor binds a
+# circuit to the SOCKS *username*, so socks5://tor-3g0:x@127.0.0.1:9150 is a
+# private egress IP, and changing the username yields a brand-new exit. Without
+# this flag every lane would share one circuit and one exit IP.
+SocksPort 9150 IsolateSOCKSAuth
+
+DataDirectory /var/lib/tor-ip-relay
+Log notice file /var/log/tor-ip-relay.log
+
+# Only the relay talks to this port. Never expose it.
+SocksPolicy accept 127.0.0.1/32
+SocksPolicy reject *
+
+# Circuits are cheap and we want fresh exits often; a long lifetime just means
+# a burned exit lingers in a slot.
+MaxCircuitDirtiness 600
+NewCircuitPeriod 30
+
+# We only ever egress to opencode.ai over HTTPS. Refusing to be a relay or exit
+# for anyone else keeps this node a pure client.
+ClientOnly 1

@@ -1,0 +1,19 @@
+[Unit]
+Description=oc-rotator — OpenCode free-tier IP rotator relay
+After=network-online.target docker.service ip-relay-tor.service
+# Tor supplies the egress lanes. Wants (not Requires): the relay still
+# serves via proxy lanes if tor is down, it just loses its best supply.
+Wants=network-online.target ip-relay-tor.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/opencode-rotator
+Environment=PORT=18080
+ExecStart=/root/opencode-rotator/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 18080
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -20,6 +20,13 @@ import ip_relay as ir
 def reset(monkeypatch, tmp_path):
     monkeypatch.setattr(ir, "SETTINGS_FILE", str(tmp_path / "settings.json"))
     monkeypatch.setattr(ir, "LANES_FILE", str(tmp_path / "lanes.json"))
+    # Burn memory is module-global and now persists to disk, so it MUST be
+    # isolated per test: without this, a test that 429s 1.1.1.1 blocklists that
+    # IP for every later test (which is exactly what load_lanes then filters).
+    monkeypatch.setattr(ir, "BURNED_FILE", str(tmp_path / "burned.json"))
+    ir.BURNED.clear()
+    ir.BURN_STATS.update({"blocked_intake": 0, "blocked_probe": 0,
+                          "recorded": 0, "expired": 0})
     # load_settings() mints a relay key when none is set (default-deny); tests
     # that exercise the open-control-plane path opt out explicitly.
     monkeypatch.setenv("RELAY_ALLOW_ANONYMOUS", "1")
