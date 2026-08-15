@@ -20,7 +20,7 @@ Instead of getting blocked by `429 Too Many Requests` after exhausting your sing
 
 `opencode.ai/zen/v1` gates its free tier on **two** independent things: the egress IP's budget **and** the `User-Agent` header. The UA gate was the reason nothing in this project worked.
 
-Measured 2026-08-15, **one single proxy egress IP, one key, requests interleaved back-to-back** (`/tmp/uamatrix_proxy.py`):
+Measured 2026-08-15 through **one single proxy egress IP** (`http://91.236.153.5:3128`, 1269ms), one key, requests interleaved back-to-back (`/tmp/uamatrix_proxy.py`):
 
 | `User-Agent` sent | Result |
 |---|---|
