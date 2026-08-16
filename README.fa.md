@@ -2,7 +2,7 @@
 
 **هر endpoint سازگار با OpenAI که محدودیت سهمیه بر اساس آدرس IP دارد را به یک استخر پروکسی چرخان با کانکارنسی بالا تبدیل کنید.**
 
-[English Version](README.md) · [بنچمارک](BENCHMARK.md) · [اسکرین‌شات داشبورد](https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/docs/dashboard.png)
+[English Version](README.md) · [بنچمارک](BENCHMARK.md) · [تغییرات نسخه ۱.۱](docs/CHANGELOG-v1.1.fa.md)
 
 ---
 
@@ -11,6 +11,10 @@
 به جای برخورد با خطای `429 Too Many Requests` بعد از اتمام سهمیه تک IP سرور خود، `ip-relay` درخواست‌ها را به‌طور پویا از بین استخر چرخان از کانال‌های پروکسی فعال (HTTP/S, SOCKS4/5, Webshare) عبور می‌دهد. هر درخواست از یک IP تمیز خروجی می‌گیرد که سهمیه مستقل خود را دارد.
 
 ![داشبورد](https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/docs/dashboard.png)
+
+<sub>داشبورد رابط کاربری فارسی راست‌به‌چپ هم دارد — از **تنظیمات ← رابط کاربری** عوض می‌شود:</sub>
+
+![داشبورد فارسی](https://raw.githubusercontent.com/sajjadgazergar-work/ip-relay/main/docs/dashboard-fa.png)
 
 > ⚠️ **توجه**: این ابزار صرفاً برای چرخش درخواست‌ها بین مسیرهای خروجی پروکسی جهت جلوگیری از اتمام سهمیه نرخ مصرف (Rate Limit) روی تک IP طراحی شده است. لطفاً پیش از استفاده، قوانین سرویس‌دهنده بالادست را مطالعه کرده و با آن سازگار باشید.
 
@@ -214,9 +218,22 @@ pip install -r requirements-dev.txt
 # اجرای ابزار بررسی استایل کد
 ruff check .
 
-# اجرای تست‌های واحد رله (۱۷ تست با موفقیت پاس شدند)
-pytest
+# اجرای تست‌های واحد رله (۱۷۱ تست، کاملاً mock شده و بدون شبکه)
+IP_RELAY_NO_BACKGROUND=1 pytest -q
 ```
+
+### ابزارهای داشبورد و بومی‌سازی
+
+همه‌ی رشته‌های فارسی در یک جدول واحد `tools/i18n_strings.py` نگه‌داری می‌شوند که سه مصرف‌کننده دارد، پس واگرایی ممکن نیست:
+
+```bash
+python3 tools/persian_lint_dashboard.py        # بررسی ماشینی فارسی رشته‌های رابط کاربری
+python3 tools/persian_lint_file.py README.fa.md  # همان بررسی روی یک فایل متنی
+python3 tools/i18n_gen.py                     # تولید دوباره‌ی دیکشنری JavaScript داخل dashboard.html
+python3 tools/i18n_annotate.py                # مهر زدن data-i18n روی نشانه‌گذاری (تکرارپذیر)
+```
+
+پس از هر تغییر در متن رابط کاربری هر سه را اجرا کنید.
 
 ---
 

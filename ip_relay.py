@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import gzip
 import hmac
 import json
 import logging
@@ -50,6 +51,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from starlette.datastructures import Headers, MutableHeaders
 
 log = logging.getLogger("ip-relay")
 logging.basicConfig(
@@ -58,7 +60,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # ── settings (env as base, settings.json overlays; UI writes the file) ──
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "settings.json")
@@ -111,6 +113,20 @@ DEFAULTS = {
     # A live exit survives 40+ requests, so spreading load thin re-pays the
     # ~35% miss cost on every request. Pin a few proven lanes and drain them.
     "lane_pin_count": 3,              # proven lanes kept hot for traffic
+    # ── v1.1: control-plane exposure ───────────────────────────────
+    # /metrics was unauthenticated by design ("it holds no credentials"), but
+    # v1.1 puts TOKEN VOLUME on it — i.e. exactly how much of a per-IP free tier
+    # this relay is consuming and when. On a box whose port is reachable from the
+    # internet (measured: 18080 open, no firewall rule) that is an operational
+    # tell, not a neutral gauge. Default-deny; flip to False for a local Prom
+    # scraper that cannot send a bearer token.
+    "metrics_require_auth": True,
+    # ── v1.1: dashboard language ───────────────────────────────────
+    # English default, Persian opt-in. Server-side so the choice survives a
+    # restart and a different browser; deliberately NOT derived from
+    # Accept-Language — an Iranian operator running an English toolchain should
+    # not have their dashboard flipped for them.
+    "ui_lang": "en",                  # "en" | "fa"
 }
 settings: dict = dict(DEFAULTS)
 
@@ -208,6 +224,7 @@ TOR_ENABLED = DEFAULTS["tor_enabled"]
 TOR_LANES = DEFAULTS["tor_lanes"]
 TOR_SOCKS_PORT = DEFAULTS["tor_socks_port"]
 LANE_PIN_COUNT = DEFAULTS["lane_pin_count"]
+METRICS_REQUIRE_AUTH = DEFAULTS["metrics_require_auth"]
 
 # Adaptive probe concurrency. A fixed number is wrong on every link: 60 melts
 # an Iranian residential CPE's NAT table (the root cause of the "0 warm
@@ -289,6 +306,7 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     global LANE_MAX_INFLIGHT, MAX_LANES_PER_SUBNET, ADAPTIVE_CONCURRENCY, PERSIST_LANES
     global UPSTREAM_API_KEYS, UPSTREAM_UA
     global BURN_MEMORY, BURN_TTL_SEC, TOR_ENABLED, TOR_LANES, TOR_SOCKS_PORT, LANE_PIN_COUNT
+    global METRICS_REQUIRE_AUTH
     old_base, old_key = UPSTREAM_BASE_URL, UPSTREAM_API_KEY
     for k, v in new.items():
         if k in DEFAULTS:
@@ -320,6 +338,13 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     TOR_LANES = max(0, int(settings.get("tor_lanes", DEFAULTS["tor_lanes"])))
     TOR_SOCKS_PORT = int(settings.get("tor_socks_port", DEFAULTS["tor_socks_port"]))
     LANE_PIN_COUNT = max(1, int(settings.get("lane_pin_count", DEFAULTS["lane_pin_count"])))
+    METRICS_REQUIRE_AUTH = bool(settings.get("metrics_require_auth",
+                                             DEFAULTS["metrics_require_auth"]))
+    # Language is a UI policy, not a runtime knob — validate and store only.
+    # An unknown value must fall back to English rather than render a dashboard
+    # of missing-key placeholders.
+    if str(settings.get("ui_lang", "en")) not in ("en", "fa"):
+        settings["ui_lang"] = "en"
     UPSTREAM_UA = str(settings.get("upstream_user_agent") or DEFAULTS["upstream_user_agent"]).strip() \
         or str(DEFAULTS["upstream_user_agent"])
     if "opencode" not in UPSTREAM_UA.lower():
@@ -499,6 +524,101 @@ handler.setFormatter(logging.Formatter(
 logging.getLogger().addHandler(handler)
 
 app = FastAPI(title="ip-relay")
+
+
+class SingleShotGZipMiddleware:
+    """gzip for whole responses ONLY — never for streamed ones.
+
+    The dashboard is a single 125 KB inline document that was shipped
+    uncompressed on every load (measured); gzip takes it to ~25 KB. But
+    starlette's own GZipMiddleware cannot be used here: it feeds streamed chunks
+    into a GzipFile without a sync flush, so zlib holds them internally. Measured
+    on starlette 0.41.3 with a real uvicorn socket and a generator emitting 5
+    frames 0.25s apart:
+
+        plain             -> 7 wire chunks at 0.02 / 0.27 / 0.52 / 0.77 / 1.02s   (incremental)
+        GZipMiddleware    -> 2 wire chunks at 0.01 / 1.26s                        (COALESCED)
+
+    Coalesced means an SSE consumer receives nothing until the response ends —
+    which would silently break both the /v1 streaming relay (token-by-token
+    output is the whole point) and the dashboard's /api/events feed.
+
+    So the rule here is structural, not a content-type blocklist: a response is
+    compressed only when its entire body arrives in ONE ASGI message
+    (more_body=False). Streaming responses always set more_body=True on the first
+    chunk, so they are passed through untouched, byte for byte, forever — no
+    future endpoint can accidentally opt into breakage.
+    """
+
+    def __init__(self, app, minimum_size: int = 1024, compresslevel: int = 6):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        accepts_gzip = False
+        for name, value in scope.get("headers") or []:
+            if name == b"accept-encoding" and b"gzip" in value.lower():
+                accepts_gzip = True
+                break
+        if not accepts_gzip:
+            await self.app(scope, receive, send)
+            return
+
+        start_message: dict | None = None
+        passthrough = False
+
+        async def send_wrapper(message):
+            nonlocal start_message, passthrough
+            if passthrough:
+                await send(message)
+                return
+            if message["type"] == "http.response.start":
+                # Hold the head: whether it can be compressed is only knowable
+                # once the first body message reveals more_body.
+                start_message = message
+                return
+            if message["type"] != "http.response.body":
+                await send(message)
+                return
+
+            body = message.get("body", b"")
+            streaming = message.get("more_body", False)
+            headers = Headers(raw=(start_message or {}).get("headers", []))
+            already_encoded = "content-encoding" in headers
+            ctype = headers.get("content-type", "")
+
+            if (streaming or already_encoded or len(body) < self.minimum_size
+                    or ctype.startswith("text/event-stream")):
+                passthrough = True
+                if start_message is not None:
+                    await send(start_message)
+                    start_message = None
+                await send(message)
+                return
+
+            packed = gzip.compress(body, compresslevel=self.compresslevel)
+            if len(packed) >= len(body):        # incompressible: don't bother
+                passthrough = True
+                await send(start_message)
+                start_message = None
+                await send(message)
+                return
+            mh = MutableHeaders(raw=start_message["headers"])
+            mh["Content-Encoding"] = "gzip"
+            mh["Content-Length"] = str(len(packed))
+            mh.add_vary_header("Accept-Encoding")
+            await send(start_message)
+            start_message = None
+            await send({"type": "http.response.body", "body": packed, "more_body": False})
+
+        await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(SingleShotGZipMiddleware, minimum_size=1024)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -747,7 +867,8 @@ class Lane:
     prefer the highest-scored warm lane. Latency is tracked for ranking."""
     __slots__ = ("addr", "proto", "score", "lat_ms", "ok", "fails",
                  "parked_until", "last_ok", "last_probe", "probe_tries",
-                 "consec_fails", "inflight", "_sem", "created")
+                 "consec_fails", "inflight", "_sem", "created",
+                 "tok_in", "tok_out")
 
     def __init__(self, addr: str, proto: str):
         self.addr = addr            # "ip:port" or "" for the direct lane
@@ -764,6 +885,10 @@ class Lane:
         self.inflight = 0           # requests currently in flight on this lane
         self._sem: asyncio.Semaphore | None = None
         self.created = time.time()
+        # v1.1 token meter, per lane: makes "which egress actually spent the
+        # quota" answerable, not just "which egress served requests".
+        self.tok_in = 0
+        self.tok_out = 0
 
     # ── capacity ───────────────────────────────────────────────────
     # Free proxies collapse under parallel load: without a per-lane cap the
@@ -863,7 +988,8 @@ class Lane:
     def to_dict(self) -> dict:
         return {"addr": self.addr, "proto": self.proto, "score": round(self.score, 4),
                 "lat_ms": round(self.lat_ms, 1), "ok": self.ok, "fails": self.fails,
-                "last_ok": round(self.last_ok, 1)}
+                "last_ok": round(self.last_ok, 1),
+                "tok_in": self.tok_in, "tok_out": self.tok_out}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Lane":
@@ -873,7 +999,14 @@ class Lane:
         ln.ok = int(d.get("ok", 0))
         ln.fails = int(d.get("fails", 0))
         ln.last_ok = float(d.get("last_ok", 0.0))
+        # pre-v1.1 lanes.json has no token columns — default, never fail to load
+        ln.tok_in = int(d.get("tok_in", 0) or 0)
+        ln.tok_out = int(d.get("tok_out", 0) or 0)
         return ln
+
+    def add_tokens(self, tok_in: int, tok_out: int) -> None:
+        self.tok_in += int(tok_in or 0)
+        self.tok_out += int(tok_out or 0)
 
 
 class Pool:
@@ -1048,11 +1181,37 @@ def _note_quota_ok() -> None:
 # hour ago?" are answerable. Lifetime counters alone cannot do that.
 # ══════════════════════════════════════════════════════════════════
 
-REQ_LOG: collections.deque = collections.deque(maxlen=2000)  # (ts, lane, status, ms, stream)
+# Row shape: (ts, lane, status, ms, stream, tok_in, tok_out)
+#
+# v1.1 appended two fields instead of introducing a dataclass on purpose: this
+# deque is hot (every request) and is also constructed directly by the test
+# suite. Everything that reads it therefore indexes POSITIONALLY and tolerates
+# short rows (_row_tokens), so a 5-tuple written by an older caller or a test
+# still parses. Never unpack a row with `for a, b, c, d, e in REQ_LOG` again —
+# that is exactly what broke when the tokens landed.
+REQ_LOG: collections.deque = collections.deque(maxlen=2000)
 
 
-def record_request(lane: str, status: int, ms: float, stream: bool = False) -> None:
-    REQ_LOG.append((time.time(), lane, status, ms, stream))
+def record_request(lane: str, status: int, ms: float, stream: bool = False,
+                   tok_in: int = 0, tok_out: int = 0) -> list:
+    """Append one request row and return it.
+
+    The row is a LIST, not a tuple, so a streaming response can fill in its
+    token columns when the stream finally closes (usage is only known at the
+    end) without double-counting the request. Callers that ignore the return
+    value are unaffected; readers index positionally either way.
+    """
+    row = [time.time(), lane, status, ms, stream, int(tok_in or 0), int(tok_out or 0)]
+    REQ_LOG.append(row)
+    if tok_in or tok_out:
+        usage_add(int(tok_in or 0), int(tok_out or 0))
+    return row
+
+
+def _row_tokens(row: tuple) -> tuple[int, int]:
+    """(tok_in, tok_out) for a REQ_LOG row, tolerating pre-v1.1 5-tuples."""
+    return (int(row[5]) if len(row) > 5 else 0,
+            int(row[6]) if len(row) > 6 else 0)
 
 
 def _pct(sorted_vals: list[float], q: float) -> float:
@@ -1067,6 +1226,11 @@ def metrics_window(seconds: int = 300) -> dict:
     rows = [r for r in REQ_LOG if r[0] >= cutoff]
     lat = sorted(r[3] for r in rows if r[2] == 200)
     ok = sum(1 for r in rows if r[2] == 200)
+    tok_in = tok_out = 0
+    for r in rows:
+        ti, to = _row_tokens(r)
+        tok_in += ti
+        tok_out += to
     return {
         "window_sec": seconds,
         "requests": len(rows),
@@ -1077,23 +1241,234 @@ def metrics_window(seconds: int = 300) -> dict:
         "p50_ms": round(_pct(lat, 0.50)),
         "p95_ms": round(_pct(lat, 0.95)),
         "p99_ms": round(_pct(lat, 0.99)),
+        # v1.1 token meter: same window as everything else, so "tokens/min" is
+        # directly comparable to "requests/min" on the dashboard.
+        "tokens_in": tok_in,
+        "tokens_out": tok_out,
+        "tokens": tok_in + tok_out,
+        "tpm": round((tok_in + tok_out) / (seconds / 60.0), 1),
+        "avg_tokens_per_req": round((tok_in + tok_out) / ok, 1) if ok else 0.0,
     }
 
 
 def sparkline_series(buckets: int = 30, bucket_sec: int = 2) -> dict:
-    """Per-bucket request counts and p95 for the dashboard sparklines."""
+    """Per-bucket request counts, p95 and token volume for the dashboard."""
     now = time.time()
     counts = [0] * buckets
+    toks = [0] * buckets
     lats: list[list[float]] = [[] for _ in range(buckets)]
-    for ts, _lane, status, ms, _stream in REQ_LOG:
+    for row in REQ_LOG:
+        ts, status, ms = row[0], row[2], row[3]
         age = now - ts
         idx = buckets - 1 - int(age // bucket_sec)
         if 0 <= idx < buckets:
             counts[idx] += 1
+            ti, to = _row_tokens(row)
+            toks[idx] += ti + to
             if status == 200:
                 lats[idx].append(ms)
     p95 = [round(_pct(sorted(b), 0.95)) for b in lats]
-    return {"bucket_sec": bucket_sec, "requests": counts, "p95_ms": p95}
+    return {"bucket_sec": bucket_sec, "requests": counts, "p95_ms": p95, "tokens": toks}
+
+
+# ══════════════════════════════════════════════════════════════════
+# TOKEN METER (v1.1) — request counts alone cannot answer "how much
+# of the free tier did I actually spend?". Tokens can.
+#
+# Persisted, unlike STATS: a meter a human watches is worthless if a
+# restart silently zeroes it. Daily buckets (not one lifetime number)
+# so "today" is answerable, capped at USAGE_KEEP_DAYS so the file
+# cannot grow without bound.
+# ══════════════════════════════════════════════════════════════════
+
+USAGE_FILE = os.environ.get("USAGE_FILE", "usage.json")
+USAGE_KEEP_DAYS = 30
+
+USAGE: dict = {
+    "days": {},              # "YYYY-MM-DD" -> {"in": n, "out": n, "requests": n}
+    "lifetime": {"in": 0, "out": 0, "requests": 0},
+    "started": time.time(),  # replaced by the persisted value on load
+}
+_usage_dirty = False
+
+
+def _usage_day(ts: float | None = None) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(ts if ts is not None else time.time()))
+
+
+def usage_add(tok_in: int, tok_out: int) -> None:
+    """Book tokens against today's bucket and the lifetime total.
+
+    Never raises: a bookkeeping failure must not fail a relayed request.
+    """
+    global _usage_dirty
+    try:
+        day = USAGE["days"].setdefault(_usage_day(), {"in": 0, "out": 0, "requests": 0})
+        day["in"] += int(tok_in)
+        day["out"] += int(tok_out)
+        day["requests"] += 1
+        lt = USAGE["lifetime"]
+        lt["in"] += int(tok_in)
+        lt["out"] += int(tok_out)
+        lt["requests"] += 1
+        _usage_dirty = True
+    except Exception as e:      # pragma: no cover - defensive
+        log.debug("usage_add failed: %s", e)
+
+
+def usage_prune() -> int:
+    """Drop buckets older than USAGE_KEEP_DAYS. Returns how many were dropped."""
+    keep_from = _usage_day(time.time() - USAGE_KEEP_DAYS * 86400)
+    dead = [d for d in USAGE["days"] if d < keep_from]
+    for d in dead:
+        USAGE["days"].pop(d, None)
+    return len(dead)
+
+
+def usage_summary() -> dict:
+    """Today / 7d / lifetime rollup for the dashboard and /metrics."""
+    today = USAGE["days"].get(_usage_day(), {"in": 0, "out": 0, "requests": 0})
+    week_from = _usage_day(time.time() - 6 * 86400)
+    w_in = w_out = w_req = 0
+    for day, v in USAGE["days"].items():
+        if day >= week_from:
+            w_in += v.get("in", 0)
+            w_out += v.get("out", 0)
+            w_req += v.get("requests", 0)
+    lt = USAGE["lifetime"]
+    series_days = sorted(USAGE["days"])[-14:]
+    return {
+        "today": {"in": today.get("in", 0), "out": today.get("out", 0),
+                  "total": today.get("in", 0) + today.get("out", 0),
+                  "requests": today.get("requests", 0)},
+        "week": {"in": w_in, "out": w_out, "total": w_in + w_out, "requests": w_req},
+        "lifetime": {"in": lt["in"], "out": lt["out"],
+                     "total": lt["in"] + lt["out"], "requests": lt["requests"]},
+        # 14-day daily series so the dashboard can draw history that survives a
+        # page reload (the client-side ring cannot).
+        "series": [{"day": d,
+                    "in": USAGE["days"][d].get("in", 0),
+                    "out": USAGE["days"][d].get("out", 0)} for d in series_days],
+        "keep_days": USAGE_KEEP_DAYS,
+        "since": USAGE.get("started", 0),
+    }
+
+
+def save_usage() -> bool:
+    global _usage_dirty
+    try:
+        usage_prune()
+        tmp = USAGE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"saved": time.time(), "started": USAGE.get("started", time.time()),
+                       "days": USAGE["days"], "lifetime": USAGE["lifetime"]}, f)
+        os.replace(tmp, USAGE_FILE)   # atomic: never leave a torn file behind
+        _usage_dirty = False
+        return True
+    except Exception as e:
+        log.warning("could not save usage: %s", e)
+        return False
+
+
+def load_usage() -> bool:
+    try:
+        with open(USAGE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+    try:
+        days = data.get("days") or {}
+        USAGE["days"] = {str(k): {"in": int(v.get("in", 0)), "out": int(v.get("out", 0)),
+                                  "requests": int(v.get("requests", 0))}
+                         for k, v in days.items() if isinstance(v, dict)}
+        lt = data.get("lifetime") or {}
+        USAGE["lifetime"] = {"in": int(lt.get("in", 0)), "out": int(lt.get("out", 0)),
+                             "requests": int(lt.get("requests", 0))}
+        USAGE["started"] = float(data.get("started") or data.get("saved") or time.time())
+        usage_prune()
+        log.info("restored token meter: %d in / %d out lifetime across %d days",
+                 USAGE["lifetime"]["in"], USAGE["lifetime"]["out"], len(USAGE["days"]))
+        return True
+    except Exception as e:
+        log.warning("usage.json is unreadable (%s) — starting the meter fresh", e)
+        return False
+
+
+def extract_usage(body: bytes) -> tuple[int, int]:
+    """(prompt_tokens, completion_tokens) from a buffered upstream response.
+
+    Handles the JSON body of a non-streaming completion AND a fully buffered SSE
+    stream. Measured against opencode zen: usage rides on the final data frames
+    even without stream_options.include_usage, and a non-standard trailing
+    {"choices":[],"cost":"0"} frame follows [DONE]. Returns (0, 0) rather than
+    raising on anything unexpected — a token meter must never break a relay.
+    """
+    if not body:
+        return 0, 0
+    try:
+        d = json.loads(body)
+        if isinstance(d, dict) and isinstance(d.get("usage"), dict):
+            u = d["usage"]
+            return int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0)
+    except Exception:
+        pass
+    # SSE: scan frames back-to-front and take the LAST usage object present —
+    # providers send cumulative usage, so the final frame is authoritative.
+    try:
+        text = body.decode("utf-8", "ignore")
+    except Exception:
+        return 0, 0
+    if "usage" not in text:
+        return 0, 0
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(payload)
+        except Exception:
+            continue
+        u = chunk.get("usage") if isinstance(chunk, dict) else None
+        if isinstance(u, dict) and (u.get("prompt_tokens") or u.get("completion_tokens")):
+            return int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0)
+    return 0, 0
+
+
+USAGE_TAIL_BYTES = 32768
+
+
+class UsageTail:
+    """Bounded tail buffer that recovers usage from a STREAMED response.
+
+    A streaming relay must not buffer the whole body — a long completion would
+    sit in RAM for nothing. Usage only appears in the final SSE frames
+    (measured), so keeping the last USAGE_TAIL_BYTES is sufficient and caps the
+    memory cost per in-flight stream regardless of response length.
+
+    Bytes are only observed, never modified: feed() returns nothing and the
+    caller yields the original chunk untouched.
+    """
+    __slots__ = ("buf", "limit")
+
+    def __init__(self, limit: int = USAGE_TAIL_BYTES):
+        self.buf = bytearray()
+        self.limit = limit
+
+    def feed(self, chunk: bytes) -> None:
+        try:
+            self.buf.extend(chunk)
+            if len(self.buf) > self.limit:
+                del self.buf[:len(self.buf) - self.limit]
+        except Exception:       # pragma: no cover - defensive
+            pass
+
+    def result(self) -> tuple[int, int]:
+        # The window may start mid-frame; extract_usage skips unparsable lines,
+        # so a truncated leading frame is harmless.
+        return extract_usage(bytes(self.buf))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1186,6 +1561,10 @@ async def lane_persist_loop() -> None:
             save_lanes()
             prune_burned()
             save_burned()
+            # Only touch the disk when tokens actually moved — an idle relay
+            # should not rewrite usage.json every 30s forever.
+            if _usage_dirty:
+                save_usage()
         except Exception as e:
             log.warning("lane persist loop error: %s", e)
 
@@ -1932,9 +2311,15 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
             if status == 200:
                 _note_quota_ok()
                 ms = (time.time() - t_start) * 1000
-                record_request(_display_addr(lane.addr), 200, ms, stream)
+                # v1.1: the body is already fully buffered here, so token
+                # accounting is a pure parse — no extra latency, no I/O.
+                tok_in, tok_out = extract_usage(body)
+                if tok_in or tok_out:
+                    lane.add_tokens(tok_in, tok_out)
+                record_request(_display_addr(lane.addr), 200, ms, stream, tok_in, tok_out)
                 publish("request", {"lane": _display_addr(lane.addr), "status": 200,
-                                    "ms": round(ms), "attempt": i + 1, "tier": lane.tier})
+                                    "ms": round(ms), "attempt": i + 1, "tier": lane.tier,
+                                    "tok_in": tok_in, "tok_out": tok_out})
                 return status, resp_headers, body
             if status == 429 and is_quota_429(body, 429):
                 # This egress IP's free-tier budget is spent. Park it for the
@@ -2089,20 +2474,44 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                 # the handshake — count it in-flight until the generator closes.
                 lane.inflight += 1
                 ms_ttfb = (time.time() - t_start) * 1000
-                record_request(_display_addr(lane.addr), 200, ms_ttfb, True)
+                # v1.1: tokens are only known when the stream closes, so record
+                # the row immediately and fill the token columns from the same
+                # (mutable) row in the generator's finally. The tail buffer is
+                # shared with the generator by closure — same pattern as aiter.
+                stream_row = record_request(_display_addr(lane.addr), 200, ms_ttfb, True)
+                tail = UsageTail()
                 publish("request", {"lane": _display_addr(lane.addr), "status": 200,
                                     "ms": round(ms_ttfb), "attempt": i + 1,
                                     "tier": lane.tier, "stream": True})
 
                 async def chunks():
+                    tok_in = tok_out = 0
                     try:
-                        yield first
+                        for c in (first,):
+                            tail.feed(c)
+                            yield c
                         async for chunk in aiter:
+                            tail.feed(chunk)
                             yield chunk
+                        # Usage rides on the final frames (measured against
+                        # opencode zen — it emits usage even without
+                        # stream_options.include_usage). Record once the stream
+                        # has ENDED naturally, not per-chunk: per-chunk would
+                        # count cumulative usage N times.
+                        tok_in, tok_out = tail.result()
                     except Exception as e:
                         log.warning("stream on lane %s interrupted mid-stream: %s", _display_addr(lane.addr), repr(e))
                         yield b'data: {"error":{"message":"upstream stream interrupted","type":"stream_interrupted"}}\n\n'
                     finally:
+                        # Fill the row's token columns in place. The total row
+                        # count stays exactly one per stream — no double count.
+                        stream_row[5] = tok_in
+                        stream_row[6] = tok_out
+                        if tok_in or tok_out:
+                            lane.add_tokens(tok_in, tok_out)
+                            usage_add(tok_in, tok_out)
+                            publish("usage", {"lane": _display_addr(lane.addr),
+                                              "tok_in": tok_in, "tok_out": tok_out})
                         lane.inflight = max(0, lane.inflight - 1)
                         await owned_resp.aclose()
                         await owned_client.aclose()
@@ -2478,11 +2887,20 @@ def openai_sse_to_anthropic(body: bytes, model: str) -> bytes:
 
     out.append(ev("message_start", {"type": "message_start", "message": {
         "id": msg_id, "type": "message", "role": "assistant", "model": model,
-        "content": [], "stop_reason": None, "usage": {"input_tokens": 0, "output_tokens": 0}}}))
+        "content": [], "stop_reason": None,
+        # placeholder — rewritten below once the stream's real usage is known
+        "usage": {"input_tokens": 0, "output_tokens": 0}}}))
+    MSG_START_IDX = len(out) - 1
 
     text_buf = ""
     tool_calls: dict[int, dict] = {}
     finish = "end_turn"
+    # v1.1: real token counts. This function used to hardcode output_tokens: 0,
+    # so any Anthropic-protocol client doing its own accounting through the
+    # relay read zeros. Usage arrives on the final frames (and on frames whose
+    # "choices" list is EMPTY — those must not be skipped), so it is captured
+    # before the choices are touched.
+    tok_in = tok_out = 0
     for raw in body.decode("utf-8", "ignore").splitlines():
         if not raw.startswith("data:"):
             continue
@@ -2491,6 +2909,13 @@ def openai_sse_to_anthropic(body: bytes, model: str) -> bytes:
             break
         try:
             c = json.loads(data)
+        except Exception:
+            continue
+        u = c.get("usage") if isinstance(c, dict) else None
+        if isinstance(u, dict):
+            tok_in = int(u.get("prompt_tokens") or 0) or tok_in
+            tok_out = int(u.get("completion_tokens") or 0) or tok_out
+        try:
             choice = c["choices"][0]
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
@@ -2533,8 +2958,15 @@ def openai_sse_to_anthropic(body: bytes, model: str) -> bytes:
         block_index += 1
     out.append(ev("message_delta", {"type": "message_delta",
                                     "delta": {"stop_reason": _oai_finish_to_anthropic(finish)},
-                                    "usage": {"output_tokens": 0}}))
+                                    "usage": {"output_tokens": tok_out}}))
     out.append("event: message_stop\ndata: {\"type\":\"message_stop\"}\n")
+    if tok_in or tok_out:
+        # Anthropic carries input_tokens on message_start, so the placeholder is
+        # rewritten now that the whole (already buffered) body has been scanned.
+        out[MSG_START_IDX] = ev("message_start", {"type": "message_start", "message": {
+            "id": msg_id, "type": "message", "role": "assistant", "model": model,
+            "content": [], "stop_reason": None,
+            "usage": {"input_tokens": tok_in, "output_tokens": tok_out}}})
     return "\n".join(out).encode()
 
 
@@ -2570,6 +3002,11 @@ async def lifespan(_app: FastAPI):
     restored = load_lanes()
     if restored:
         log.info("warm-start: %d remembered lanes queued for fast revalidation", restored)
+
+    # 3a. v1.1 token meter. Unlike STATS (lifetime counters that die with the
+    #     process), the token meter is a number a human watches over days — so
+    #     it is restored from disk before any request can be served.
+    load_usage()
 
     # 3b. Tor egress. Enabled by config; verified by an actual connect to the
     #     SOCKS port, so a misconfigured port degrades to "no tor lanes" with a
@@ -2615,6 +3052,11 @@ async def lifespan(_app: FastAPI):
         b = save_burned()
         if b:
             log.info("shutdown: persisted %d burned IPs to %s", b, BURNED_FILE)
+        # Always flush the meter on the way out, dirty or not: a restart must
+        # never be the reason a token total went backwards.
+        if save_usage():
+            log.info("shutdown: token meter at %d in / %d out (%s)",
+                     USAGE["lifetime"]["in"], USAGE["lifetime"]["out"], USAGE_FILE)
         for t in tasks:
             t.cancel()
 
@@ -2679,12 +3121,21 @@ async def healthz():
 
 
 @app.get("/metrics")
-async def metrics():
-    """Prometheus text exposition. Unauthenticated on purpose: it contains no
-    credentials and no proxy addresses, and scrapers rarely carry bearer
-    tokens. Bind to localhost or firewall the port if that is not acceptable."""
+async def metrics(request: Request):
+    """Prometheus text exposition.
+
+    v1.1 gates this behind the relay key by default (metrics_require_auth).
+    Until v1.1 it was deliberately open on the grounds that it holds no
+    credentials — but it now carries token volume, which is a direct readout of
+    how much of a per-IP free tier this relay has spent and when. On a publicly
+    reachable port that is an operational tell worth protecting. Set
+    metrics_require_auth=false for a local scraper that cannot send a bearer.
+    """
+    if METRICS_REQUIRE_AUTH and not _check_relay_auth(request, allow_query=True):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     s = POOL.stats()
     m5 = metrics_window(300)
+    u = usage_summary()
     lines = [
         "# HELP iprelay_warm_lanes Warm egress lanes",
         "# TYPE iprelay_warm_lanes gauge",
@@ -2728,6 +3179,22 @@ async def metrics():
         "# HELP iprelay_quota_exhausted Upstream key quota exhausted (1/0)",
         "# TYPE iprelay_quota_exhausted gauge",
         f"iprelay_quota_exhausted {1 if QUOTA_STATE['exhausted'] else 0}",
+        # ── v1.1 token meter ──────────────────────────────────────
+        "# HELP iprelay_tokens_in_total Prompt tokens relayed (lifetime, persisted)",
+        "# TYPE iprelay_tokens_in_total counter",
+        f"iprelay_tokens_in_total {u['lifetime']['in']}",
+        "# HELP iprelay_tokens_out_total Completion tokens relayed (lifetime, persisted)",
+        "# TYPE iprelay_tokens_out_total counter",
+        f"iprelay_tokens_out_total {u['lifetime']['out']}",
+        "# HELP iprelay_tokens_today Tokens relayed today, UTC day bucket",
+        "# TYPE iprelay_tokens_today gauge",
+        f"iprelay_tokens_today {u['today']['total']}",
+        "# HELP iprelay_tokens_window Tokens relayed in the 5m window",
+        "# TYPE iprelay_tokens_window gauge",
+        f"iprelay_tokens_window {m5['tokens']}",
+        "# HELP iprelay_tokens_per_minute Token throughput over the 5m window",
+        "# TYPE iprelay_tokens_per_minute gauge",
+        f"iprelay_tokens_per_minute {m5['tpm']}",
     ]
     return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
@@ -2860,6 +3327,7 @@ async def api_stats(request: Request):
     return {"version": VERSION, "uptime_sec": int(time.time() - STATS["started"]),
             "pool": s, "stats": STATS, "settings": public_settings(),
             "adaptive": ADAPT, "metrics": metrics_window(300),
+            "usage": usage_summary(),
             "burn": {"known_spent_ips": len(BURNED), "ttl_sec": BURN_TTL_SEC,
                      "enabled": BURN_MEMORY, **BURN_STATS},
             "tor": {"enabled": TOR_ENABLED, "socks_port": TOR_SOCKS_PORT,
@@ -2893,6 +3361,10 @@ async def api_pool(request: Request):
              "kind": "tor" if ln.addr.startswith(TOR_LANE_PREFIX) else ("direct" if not ln.addr else "proxy"),
              "proven": ln.ok > 0,
              "age_sec": int(now - ln.created),
+             # v1.1: per-lane token spend answers "which egress actually burned
+             # the quota", which lane request counts alone cannot.
+             "tok_in": ln.tok_in, "tok_out": ln.tok_out,
+             "tokens": ln.tok_in + ln.tok_out,
              "last_ok_ago": int(now - ln.last_ok) if ln.last_ok else -1}
             for ln in all_warm[offset:offset + limit]]
     parked = [{"addr": _display_addr(ln.addr), "proto": ln.proto, "until_in": int(ln.parked_until - now),
@@ -3133,6 +3605,47 @@ async def anthropic_messages(request: Request):
 
 DASHBOARD_HTML = open(os.path.join(os.path.dirname(__file__), "dashboard.html"), encoding="utf-8").read() \
     if os.path.exists(os.path.join(os.path.dirname(__file__), "dashboard.html")) else "<h1>dashboard.html missing</h1>"
+
+# ── static assets (v1.1) ───────────────────────────────────────────
+# Self-hosted fonts. Measured: the Google Fonts CSS2 request took 6.96s from
+# Iran and BLOCKS first paint, and fonts.gstatic.com is inconsistently
+# reachable — the Persian UI would have been unusable and the English one was
+# already paying for it. 340KB of woff2 served locally is instant and works
+# offline/air-gapped. No StaticFiles mount: one explicit handler keeps the
+# module single-file and the path traversal surface at zero.
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+_STATIC_ALLOWED = {".woff2": "font/woff2", ".woff": "font/woff",
+                   ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
+                   ".png": "image/png", ".ico": "image/x-icon"}
+
+
+@app.get("/static/{path:path}")
+async def static_asset(path: str):
+    """Serve font/asset files with a long cache lifetime.
+
+    Traversal defence is structural, not a blocklist: the resolved real path
+    must live under STATIC_DIR, and the extension must be in an allowlist. A
+    '..' or an absolute path therefore cannot escape, and a symlink pointing
+    outside the tree is rejected too (realpath resolves it before the check).
+    """
+    if not path or "\x00" in path:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    root = os.path.realpath(STATIC_DIR)
+    target = os.path.realpath(os.path.join(root, path))
+    if not (target == root or target.startswith(root + os.sep)):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    ext = os.path.splitext(target)[1].lower()
+    if ext not in _STATIC_ALLOWED or not os.path.isfile(target):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        with open(target, "rb") as fh:
+            body = fh.read()
+    except OSError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    # Fonts are content-addressed by filename+version here; a year is safe and
+    # means a dashboard reload never refetches them.
+    return Response(body, media_type=_STATIC_ALLOWED[ext],
+                    headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -6,9 +6,31 @@
 <meta name="color-scheme" content="dark">
 <title>ip-relay // egress rotator</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fbfbfb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cline x1='2' y1='12' x2='22' y2='12'/%3E%3Cpath d='M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- v1.1: fonts are self-hosted. The Google Fonts stylesheet measured 6.96s
+     from Iran and blocks first paint; fonts.gstatic.com is not reliably
+     reachable here at all. Preload only the two faces used above the fold —
+     preloading all ten would compete with the API calls for connections. -->
+<link rel="preload" href="/static/fonts/inter-latin-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/inter-latin-600.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+/* ── self-hosted faces ─────────────────────────────────────────────
+   font-display: swap so text paints immediately in the fallback and reflows
+   when the face lands — never a blank screen, which is what the render-blocking
+   Google stylesheet produced on a slow link. */
+@font-face { font-family: 'Inter'; src: url('/static/fonts/inter-latin-400.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('/static/fonts/inter-latin-500.woff2') format('woff2'); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('/static/fonts/inter-latin-600.woff2') format('woff2'); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('/static/fonts/inter-latin-700.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Roboto Mono'; src: url('/static/fonts/robotomono-latin-400.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Roboto Mono'; src: url('/static/fonts/robotomono-latin-500.woff2') format('woff2'); font-weight: 500; font-style: normal; font-display: swap; }
+/* Vazirmatn: Persian UI face. unicode-range means the browser only downloads
+   it when Persian glyphs are actually painted — English users never fetch
+   200KB they cannot read, even though the rules are always present. */
+@font-face { font-family: 'Vazirmatn'; src: url('/static/fonts/vazirmatn-400.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+0600-06FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF; }
+@font-face { font-family: 'Vazirmatn'; src: url('/static/fonts/vazirmatn-500.woff2') format('woff2'); font-weight: 500; font-style: normal; font-display: swap; unicode-range: U+0600-06FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF; }
+@font-face { font-family: 'Vazirmatn'; src: url('/static/fonts/vazirmatn-600.woff2') format('woff2'); font-weight: 600; font-style: normal; font-display: swap; unicode-range: U+0600-06FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF; }
+@font-face { font-family: 'Vazirmatn'; src: url('/static/fonts/vazirmatn-700.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; unicode-range: U+0600-06FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF; }
+</style>
 <style>
 /* ════════════════════════════════════════════════════════════════
    ip-relay dashboard — liquid metal / glassmorphism
@@ -16,7 +38,13 @@
    against its own background (WCAG AA, >= 4.5:1 body / >= 3:1 large).
    ════════════════════════════════════════════════════════════════ */
 :root {
-  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  /* Vazirmatn is listed FIRST for the Persian range and Inter carries Latin.
+     Order matters: with Inter first, the browser would use Inter's (absent)
+     Arabic coverage decision path and fall through to a system Arabic face,
+     which is what makes half-translated dashboards look broken. Both faces are
+     self-hosted, and the unicode-range on Vazirmatn means English users never
+     download it. */
+  --font-sans: 'Inter', 'Vazirmatn', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'Roboto Mono', ui-monospace, SFMono-Regular, monospace;
 
   --bg: #070707;
@@ -47,6 +75,26 @@
   --focus: #aae8ff;
   --radius: 16px;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ── v1.1 baked glass ──────────────────────────────────────────
+     backdrop-filter on 22 elements was the glitch: the fullscreen shader
+     invalidated every one of them every frame, so shader cost and blur cost
+     MULTIPLIED (measured 816ms/frame shipped vs 50ms with both gone).
+     These layers reproduce the same frosted read — inner top highlight,
+     depth gradient, edge sheen — as static paint. They rasterise once instead
+     of re-blurring per frame, so the look survives and the cost does not. */
+  --glass: linear-gradient(168deg, rgba(255,255,255,0.075) 0%,
+                                   rgba(255,255,255,0.022) 34%,
+                                   rgba(10,10,10,0.30) 100%),
+           radial-gradient(120% 88% at 12% 0%, rgba(170,232,255,0.055) 0%,
+                                               rgba(170,232,255,0) 58%),
+           rgba(19,19,19,0.90);
+  --glass-pill: linear-gradient(165deg, rgba(255,255,255,0.06) 0%,
+                                        rgba(255,255,255,0.018) 40%,
+                                        rgba(8,8,8,0.26) 100%),
+                rgba(17,17,17,0.88);
+  --glass-inset: inset 0 1px 0 rgba(255,255,255,0.075),
+                 inset 0 0 0 1px rgba(255,255,255,0.012);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -113,6 +161,30 @@ textarea:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   #canvas-bg { display: none; }
 }
 
+/* ── RTL (v1.1) ─────────────────────────────────────────────────
+   The layout itself needs no mirroring: it is flex/grid, and dir="rtl" on
+   <html> flips the main axis for free. Only these three rules are genuinely
+   direction-bound, because a transform in px does not know about writing mode.
+   Kept as a short explicit block rather than a mirrored stylesheet — a second
+   stylesheet is where LTR/RTL drift starts. */
+[dir="rtl"] .skip-link { transform: translateX(50%) translateY(-140%); }
+[dir="rtl"] .skip-link:focus { transform: translateX(50%) translateY(0); }
+[dir="rtl"] .switch input:checked + .switch-slider::before { transform: translateX(-18px); }
+/* Telemetry, addresses, and code are LTR content even in a Persian UI: an IPv4
+   address or a curl command reordered by the bidi algorithm is unreadable and,
+   worse, looks like a different address. Force direction on those runs. */
+[dir="rtl"] .mono-cell,
+[dir="rtl"] .terminal-wrapper,
+[dir="rtl"] .code-block,
+[dir="rtl"] pre,
+[dir="rtl"] code,
+[dir="rtl"] input[type="url"],
+[dir="rtl"] input[type="password"],
+[dir="rtl"] #logFilter,
+[dir="rtl"] .badge-proto { direction: ltr; text-align: start; unicode-bidi: isolate; }
+[dir="rtl"] .stat-val,
+[dir="rtl"] .kpi-value { direction: ltr; unicode-bidi: isolate; }
+
 /* High-contrast preference: drop the glass, raise the borders */
 @media (prefers-contrast: more) {
   :root {
@@ -165,13 +237,13 @@ header.site-header {
 
 /* ── Cards / panels ────────────────────────────────────────────── */
 .card {
-  background: var(--surface);
+  background: var(--glass);
   border: 1px solid var(--surface-border);
   border-radius: var(--radius);
   padding: 20px;
-  backdrop-filter: blur(22px) saturate(140%);
-  -webkit-backdrop-filter: blur(22px) saturate(140%);
-  box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 18px 50px rgba(0,0,0,0.4);
+  /* No backdrop-filter (v1.1). The frosted read is painted, not blurred —
+     see --glass. This is what took the dashboard off 1.2fps. */
+  box-shadow: var(--glass-inset), 0 18px 50px rgba(0,0,0,0.4);
   transition: border-color 0.25s var(--ease), transform 0.25s var(--ease);
 }
 .card:hover { border-color: var(--surface-border-hi); }
@@ -257,17 +329,40 @@ pre { margin: 0; }
 .feed-pill.down { color: var(--bad); }
 .feed-pill.down .dot { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
 
-/* ── Stat tiles with sparklines ────────────────────────────────── */
+/* ── Stat tiles with sparklines ─────────────────────────────────
+   v1.1 hierarchy: three hero KPIs read first (warm lanes / tokens today /
+   p95), then a compact secondary strip. The old 4/4/1 grid put nine equal
+   numbers in a flat wall with the last one stretched by an inline flex:1 —
+   nothing told you what mattered. Adding a tenth (tokens) forced the issue. */
+.stats-hero {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 13px; margin-bottom: 13px;
+}
 .stats-row {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px; margin-bottom: 14px;
 }
 .stat-pill {
-  background: var(--surface); border: 1px solid var(--surface-border);
+  background: var(--glass-pill); border: 1px solid var(--surface-border);
   border-radius: 14px; padding: 13px 15px;
   display: flex; flex-direction: column; gap: 2px;
   position: relative; overflow: hidden;
-  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+  box-shadow: var(--glass-inset);
+  /* backdrop-filter removed (v1.1): 10 pills x every shader frame was the
+     single largest multiplier in the blur cost. */
+}
+/* Hero tiles: same language, more presence — bigger number, a hairline
+   accent edge, and a slow sheen that only exists on the three that matter. */
+.stat-pill.hero { padding: 17px 18px 15px; border-radius: 16px; }
+.stat-pill.hero::before {
+  content: ''; position: absolute; inset-inline: 0; top: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--hero-edge, rgba(170,232,255,0.55)), transparent);
+}
+.stat-pill.hero .stat-val { font-size: 32px; letter-spacing: -0.035em; }
+.stat-pill.hero .stat-label { font-size: 10px; letter-spacing: 0.11em; }
+.stat-pill.hero .spark { height: 30px; }
+@media (max-width: 720px) {
+  .stats-hero { grid-template-columns: 1fr; }
 }
 .stat-val {
   font-size: 23px; font-weight: 600; letter-spacing: -0.02em;
@@ -392,12 +487,12 @@ details.advanced-box[open] summary { margin-bottom: 15px; }
   overflow: hidden; display: flex; align-items: center;
 }
 .slider-fill {
-  position: absolute; left: 0; top: 0; bottom: 0;
+  position: absolute; inset-inline-start: 0; top: 0; bottom: 0;
   background: linear-gradient(90deg, rgba(170,232,255,0.16), rgba(220,210,188,0.24));
   transition: width 0.12s linear;
 }
 .slider-track-text {
-  position: relative; z-index: 1; padding-left: 13px;
+  position: relative; z-index: 1; padding-inline-start: 13px;
   font-size: 11px; color: var(--text-muted); pointer-events: none;
 }
 .slider-input {
@@ -421,7 +516,7 @@ details.advanced-box[open] summary { margin-bottom: 15px; }
   border-radius: 99px; transition: background 0.22s var(--ease); pointer-events: none;
 }
 .switch-slider::before {
-  content: ''; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px;
+  content: ''; position: absolute; width: 18px; height: 18px; inset-inline-start: 3px; top: 3px;
   background: #f4f4f4; border-radius: 50%; transition: transform 0.22s var(--ease);
 }
 .switch input:checked + .switch-slider { background: rgba(170,232,255,0.55); }
@@ -434,7 +529,7 @@ table { width: 100%; border-collapse: collapse; font-size: 12px; }
 thead th {
   position: sticky; top: 0; z-index: 2;
   background: #0e0e0e;
-  text-align: left; padding: 9px 10px;
+  text-align: start; padding: 9px 10px;
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--text-muted); font-weight: 600;
   border-bottom: 1px solid var(--surface-border);
@@ -490,7 +585,7 @@ tbody tr.row-new td { animation: rowIn 0.7s var(--ease); }
   max-height: 260px; overflow: auto;
 }
 .copy-btn {
-  position: absolute; top: 9px; right: 9px;
+  position: absolute; top: 9px; inset-inline-end: 9px;
   width: 29px; height: 29px; border-radius: 8px;
   background: rgba(255,255,255,0.06); border: 1px solid var(--surface-border);
   cursor: pointer; display: flex; align-items: center; justify-content: center;
@@ -509,7 +604,7 @@ tbody tr.row-new td { animation: rowIn 0.7s var(--ease); }
 }
 .viz-shell canvas { width: 100%; height: 100%; display: block; }
 .viz-legend {
-  position: absolute; bottom: 9px; left: 12px;
+  position: absolute; bottom: 9px; inset-inline-start: 12px;
   display: flex; gap: 12px; flex-wrap: wrap;
   font-family: var(--font-mono); font-size: 10px; color: var(--text-muted);
   pointer-events: none;
@@ -547,10 +642,10 @@ tbody tr.row-new td { animation: rowIn 0.7s var(--ease); }
 .diag-list { list-style: none; display: flex; flex-direction: column; gap: 7px; }
 .diag-list li {
   font-size: 12px; color: var(--text-dim); line-height: 1.6;
-  padding-left: 20px; position: relative;
+  padding-inline-start: 20px; position: relative;
 }
 .diag-list li::before {
-  content: '!'; position: absolute; left: 0; top: 0;
+  content: '!'; position: absolute; inset-inline-start: 0; top: 0;
   width: 14px; height: 14px; border-radius: 50%;
   background: var(--warn-dim); color: var(--warn);
   font-size: 10px; font-weight: 700; text-align: center; line-height: 14px;
@@ -572,7 +667,7 @@ tbody tr.row-new td { animation: rowIn 0.7s var(--ease); }
   height: 240px; overflow-y: auto; color: #dcd2bc; line-height: 1.65;
 }
 .log-entry { margin-bottom: 3px; white-space: pre-wrap; word-break: break-word; }
-.log-time { color: var(--text-muted); margin-right: 8px; }
+.log-time { color: var(--text-muted); margin-inline-end: 8px; }
 .log-msg.scraper { color: var(--info); }
 .log-msg.probe-ok { color: var(--ok); }
 .log-msg.probe { color: #c9b6ff; }
@@ -582,20 +677,32 @@ tbody tr.row-new td { animation: rowIn 0.7s var(--ease); }
 
 /* ── Toasts ────────────────────────────────────────────────────── */
 .toast-container {
-  position: fixed; bottom: 22px; right: 22px; z-index: 300;
+  position: fixed; bottom: 22px; inset-inline-end: 22px; z-index: 300;
   display: flex; flex-direction: column; gap: 9px; max-width: min(92vw, 380px);
 }
 .toast {
-  background: rgba(16,16,16,0.94); border: 1px solid var(--surface-border-hi);
+  background: linear-gradient(168deg, rgba(255,255,255,0.05), rgba(8,8,8,0.2)), rgba(16,16,16,0.97);
+  border: 1px solid var(--surface-border-hi);
   color: var(--text); padding: 12px 18px; border-radius: 12px;
   font-size: 12.5px; font-weight: 500;
   display: flex; align-items: center; gap: 9px;
-  box-shadow: 0 12px 34px rgba(0,0,0,0.55);
-  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--glass-inset), 0 12px 34px rgba(0,0,0,0.55);
+  /* blur dropped (v1.1): toasts animate, so a live backdrop-filter re-blurred
+     whatever was under them on every frame of the slide-in. */
   transform: translateY(18px); opacity: 0;
-  animation: slideIn 0.3s var(--ease) forwards;
+  /* v1.1 gooey entrance. Reference: gooey.jakubantalik.com — a blob doesn't
+     fade in, it wobbles into place, so the radius and scale overshoot and
+     settle. transform+opacity+border-radius only, so it stays on the
+     compositor and costs no layout. */
+  animation: gooeyIn 0.42s var(--ease) forwards;
+  will-change: transform, opacity;
 }
 @keyframes slideIn { to { transform: translateY(0); opacity: 1; } }
+@keyframes gooeyIn {
+  0%   { transform: translateY(18px) scale(0.9, 1.06); border-radius: 26px 26px 18px 18px; opacity: 0; }
+  55%  { transform: translateY(-3px) scale(1.02, 0.97); border-radius: 14px 16px 12px 14px; opacity: 1; }
+  100% { transform: translateY(0) scale(1, 1); border-radius: 12px; opacity: 1; }
+}
 .toast.success { border-color: rgba(126,231,168,0.34); }
 .toast.success svg { stroke: var(--ok); }
 .toast.danger { border-color: rgba(255,138,144,0.38); }
@@ -607,6 +714,10 @@ tbody tr.row-new td { animation: rowIn 0.7s var(--ease); }
   position: fixed; inset: 0; background: rgba(0,0,0,0.74);
   z-index: 400; display: none; align-items: center; justify-content: center;
   padding: 20px; backdrop-filter: blur(4px);
+  /* The ONE surviving backdrop-filter (v1.1). It only exists while a modal is
+     open, covers one element, and the shader is paused in that state — so it
+     costs nothing in the steady state and is the one place real blur reads
+     better than paint. */
 }
 .modal-backdrop.open { display: flex; }
 .modal {
@@ -619,7 +730,7 @@ tbody tr.row-new td { animation: rowIn 0.7s var(--ease); }
 .modal p.modal-sub { font-size: 12px; color: var(--text-muted); line-height: 1.65; margin-bottom: 16px; }
 .profile-list { display: flex; flex-direction: column; gap: 9px; margin-bottom: 16px; }
 .profile-item {
-  width: 100%; text-align: left; cursor: pointer;
+  width: 100%; text-align: start; cursor: pointer;
   background: rgba(255,255,255,0.03); border: 1px solid var(--surface-border);
   border-radius: 12px; padding: 12px 14px; color: var(--text);
   font-family: inherit; transition: all 0.2s var(--ease);
@@ -644,7 +755,7 @@ footer.site-footer a { color: var(--text-dim); }
 <canvas id="canvas-bg" aria-hidden="true"></canvas>
 <div class="noise-overlay" aria-hidden="true"></div>
 
-<a class="skip-link" href="#main">Skip to main content</a>
+<a class="skip-link" href="#main" data-i18n="a11y.skip">Skip to main content</a>
 
 <!-- Screen readers announce pool/status changes from here without stealing focus -->
 <div id="liveRegion" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -658,26 +769,26 @@ footer.site-footer a { color: var(--text-dim); }
         <span>ip-relay</span>
         <span class="badge-proto" style="font-size: 9px;">v__VERSION__</span>
       </h1>
-      <p class="logo-sub">resilient egress rotator</p>
+      <p class="logo-sub" data-i18n="hdr.tagline">resilient egress rotator</p>
     </div>
 
     <div class="header-actions">
       <button type="button" class="copy-chip" onclick="copyBaseUrl()"
               aria-label="Copy the relay base URL to the clipboard">
-        <span style="color: var(--text-muted)">Base URL:</span>
-        <span id="baseUrlVal" style="font-family: var(--font-mono); font-weight: 500;">loading…</span>
+        <span style="color: var(--text-muted)" data-i18n="hdr.baseurl">Base URL:</span>
+        <span id="baseUrlVal" style="font-family: var(--font-mono); font-weight: 500;" data-i18n="hdr.loading">loading…</span>
         <span class="copy-chip-btn" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M8 10a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2h-8a2 2 0 01-2-2v-8z"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v8a2 2 0 002 2h2"/></svg>
         </span>
       </button>
 
       <button type="button" class="ghost-btn" onclick="openProfiles()"
-              aria-haspopup="dialog">Provider setup</button>
+              aria-haspopup="dialog" data-i18n="hdr.provider_setup">Provider setup</button>
 
       <p class="status-badge">
         <span id="statusPill" class="status-dot" aria-hidden="true"></span>
-        <span class="sr-only">Relay status:</span>
-        <span id="statusText">connecting…</span>
+        <span class="sr-only" data-i18n="hdr.relay_status">Relay status:</span>
+        <span id="statusText" data-i18n="hdr.connecting">connecting…</span>
       </p>
     </div>
   </header>
@@ -686,61 +797,75 @@ footer.site-footer a { color: var(--text-dim); }
 
     <!-- ══ Live metrics ══════════════════════════════════════════ -->
     <section aria-labelledby="h-metrics">
-      <h2 id="h-metrics" class="sr-only">Live metrics</h2>
+      <h2 id="h-metrics" class="sr-only" data-i18n="m.section">Live metrics</h2>
 
-      <div class="stats-row">
-        <div class="stat-pill">
+      <!-- v1.1: three hero KPIs answer the three questions you actually open
+           this page for — how much egress do I have, how much quota did I
+           spend, how fast is it. Everything else moved to the strip below. -->
+      <div class="stats-hero">
+        <div class="stat-pill hero" style="--hero-edge: rgba(126,231,168,0.55);">
           <span class="stat-val" id="cWarm">0</span>
-          <span class="stat-label">Warm lanes</span>
+          <span class="stat-label" data-i18n="m.warm">Warm lanes</span>
           <span class="stat-sub" id="cWarmSub">—</span>
           <canvas class="spark" id="sparkWarm" width="240" height="52" aria-hidden="true"></canvas>
         </div>
-        <div class="stat-pill">
-          <span class="stat-val" id="cSubnets">0</span>
-          <span class="stat-label">Unique /24 subnets</span>
-          <span class="stat-sub" id="cSubnetsSub">real width</span>
+        <div class="stat-pill hero" style="--hero-edge: rgba(170,232,255,0.6);">
+          <span class="stat-val" id="cTokens">0</span>
+          <span class="stat-label" data-i18n="m.tokens_today">Tokens today</span>
+          <span class="stat-sub" id="cTokensSub">in 0 · out 0</span>
+          <canvas class="spark" id="sparkTokens" width="240" height="52" aria-hidden="true"></canvas>
         </div>
-        <div class="stat-pill">
-          <span class="stat-val" id="cRpm">0</span>
-          <span class="stat-label">Requests / min</span>
-          <span class="stat-sub" id="cRpmSub">—</span>
-          <canvas class="spark" id="sparkRpm" width="240" height="52" aria-hidden="true"></canvas>
-        </div>
-        <div class="stat-pill">
+        <div class="stat-pill hero" style="--hero-edge: rgba(255,209,102,0.55);">
           <span class="stat-val" id="cP95">—</span>
-          <span class="stat-label">p95 latency</span>
-          <span class="stat-sub" id="cP95Sub">5 min window</span>
+          <span class="stat-label" data-i18n="m.p95">p95 latency</span>
+          <span class="stat-sub" id="cP95Sub" data-i18n="m.window5">5 min window</span>
           <canvas class="spark" id="sparkP95" width="240" height="52" aria-hidden="true"></canvas>
         </div>
       </div>
 
       <div class="stats-row">
         <div class="stat-pill">
+          <span class="stat-val" id="cRpm">0</span>
+          <span class="stat-label" data-i18n="m.rpm">Requests / min</span>
+          <span class="stat-sub" id="cRpmSub">—</span>
+          <canvas class="spark" id="sparkRpm" width="240" height="52" aria-hidden="true"></canvas>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-val" id="cSubnets">0</span>
+          <span class="stat-label" data-i18n="m.subnets">Unique /24 subnets</span>
+          <span class="stat-sub" id="cSubnetsSub" data-i18n="m.realwidth">real width</span>
+        </div>
+        <div class="stat-pill">
           <span class="stat-val" id="cSuccess">—</span>
-          <span class="stat-label">Success rate</span>
+          <span class="stat-label" data-i18n="m.success">Success rate</span>
           <span class="stat-sub" id="cSuccessSub">5 min window</span>
         </div>
         <div class="stat-pill">
-          <span class="stat-val" id="statUptime">00:00</span>
-          <span class="stat-label">Uptime</span>
-          <span class="stat-sub" id="cReqTotal">0 requests total</span>
-        </div>
-        <div class="stat-pill">
-          <span class="stat-val" id="statLatency">—</span>
-          <span class="stat-label">Best lane</span>
-          <span class="stat-sub" id="cTiers">—</span>
-        </div>
-        <div class="stat-pill">
-          <span class="stat-val" id="statProbes">0 / 0</span>
-          <span class="stat-label">Probes ok / burned</span>
-          <span class="stat-sub" id="cFailovers">0 failovers</span>
+          <span class="stat-val" id="cTokensRate">0</span>
+          <span class="stat-label" data-i18n="m.tpm">Tokens / min</span>
+          <span class="stat-sub" id="cTokensLifetime">0 lifetime</span>
         </div>
       </div>
 
       <div class="stats-row">
-        <div class="stat-pill" style="flex:1;">
-          <span class="stat-val" id="cSupplyVal" style="font-size:13px;">Egress supply</span>
-          <span class="stat-label">Tor circuits &amp; burn memory</span>
+        <div class="stat-pill">
+          <span class="stat-val" id="statUptime">00:00</span>
+          <span class="stat-label" data-i18n="m.uptime">Uptime</span>
+          <span class="stat-sub" id="cReqTotal">0 requests total</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-val" id="statLatency">—</span>
+          <span class="stat-label" data-i18n="m.bestlane">Best lane</span>
+          <span class="stat-sub" id="cTiers">—</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-val" id="statProbes">0 / 0</span>
+          <span class="stat-label" data-i18n="m.probes">Probes ok / burned</span>
+          <span class="stat-sub" id="cFailovers">0 failovers</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-val" id="cSupplyVal" style="font-size:15px;" data-i18n="m.supply">Egress supply</span>
+          <span class="stat-label" data-i18n="m.supply_sub">Tor circuits &amp; burn memory</span>
           <span class="stat-sub" id="cSupply">—</span>
         </div>
       </div>
@@ -751,7 +876,7 @@ footer.site-footer a { color: var(--text-dim); }
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:15px;">
         <h2 id="h-topo" class="card-title" style="margin-bottom:0;">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-          Live egress topology
+          <span data-i18n="t.section">Live egress topology</span>
         </h2>
         <p class="feed-pill" id="feedPill">
           <span class="dot" aria-hidden="true"></span>
@@ -761,32 +886,32 @@ footer.site-footer a { color: var(--text-dim); }
 
       <div class="engine-banner">
         <div class="kv">
-          <span style="color: var(--text-muted);">ENGINE</span>
-          <strong id="engineState" style="color: var(--info); text-transform: uppercase;">idle</strong>
+          <span style="color: var(--text-muted);" data-i18n="t.engine">ENGINE</span>
+          <strong id="engineState" style="color: var(--info); text-transform: uppercase;" data-i18n="t.idle">idle</strong>
         </div>
         <dl>
-          <div class="kv"><dt>QUEUE</dt><dd id="engineQueue">0</dd></div>
-          <div class="kv"><dt>TESTED</dt><dd id="engineTested">0</dd></div>
-          <div class="kv"><dt>WARM</dt><dd id="engineWarm">0</dd></div>
-          <div class="kv"><dt>FAILS</dt><dd id="engineFails">0</dd></div>
-          <div class="kv"><dt>STREAMS</dt><dd id="engineStreams">0</dd></div>
-          <div class="kv"><dt>CONC</dt><dd id="engineConc">—</dd></div>
+          <div class="kv"><dt data-i18n="t.queue">QUEUE</dt><dd id="engineQueue">0</dd></div>
+          <div class="kv"><dt data-i18n="t.tested">TESTED</dt><dd id="engineTested">0</dd></div>
+          <div class="kv"><dt data-i18n="t.warm">WARM</dt><dd id="engineWarm">0</dd></div>
+          <div class="kv"><dt data-i18n="t.fails">FAILS</dt><dd id="engineFails">0</dd></div>
+          <div class="kv"><dt data-i18n="t.streams">STREAMS</dt><dd id="engineStreams">0</dd></div>
+          <div class="kv"><dt data-i18n="t.conc">CONC</dt><dd id="engineConc">—</dd></div>
         </dl>
-        <button type="button" id="btnRefresh" class="ghost-btn" onclick="refreshProxies()">Refresh proxies now</button>
+        <button type="button" id="btnRefresh" class="ghost-btn" onclick="refreshProxies()" data-i18n="t.refresh">Refresh proxies now</button>
       </div>
 
       <!-- The canvas is decorative; the table below is the accessible equivalent -->
       <div class="viz-shell">
         <canvas id="networkCanvas" aria-hidden="true"></canvas>
-        <p class="viz-empty" id="vizEmpty">no warm lanes yet — discovering egress pathways…</p>
+        <p class="viz-empty" id="vizEmpty" data-i18n="t.empty">no warm lanes yet — discovering egress pathways…</p>
         <p class="viz-legend" aria-hidden="true">
-          <span><i style="background:#7ee7a8"></i>fast &lt;1.5s</span>
-          <span><i style="background:#ffd166"></i>medium &lt;4s</span>
-          <span><i style="background:#ff8a90"></i>slow</span>
-          <span><i style="background:#fff"></i>relay core</span>
+          <span><i style="background:#7ee7a8"></i><span data-i18n="t.fast">fast &lt;1.5s</span></span>
+          <span><i style="background:#ffd166"></i><span data-i18n="t.medium">medium &lt;4s</span></span>
+          <span><i style="background:#ff8a90"></i><span data-i18n="t.slow">slow</span></span>
+          <span><i style="background:#fff"></i><span data-i18n="t.core">relay core</span></span>
         </p>
       </div>
-      <p class="sr-only" id="vizSummary">Topology visualisation. The egress lanes table contains the same data in text form.</p>
+      <p class="sr-only" id="vizSummary" data-i18n="t.a11y">Topology visualisation. The egress lanes table contains the same data in text form.</p>
     </section>
 
     <div class="grid-main">
@@ -797,7 +922,7 @@ footer.site-footer a { color: var(--text-dim); }
         <section class="card" aria-labelledby="h-connect">
           <h2 id="h-connect" class="card-title">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-            Connect your application
+            <span data-i18n="g.section">Connect your application</span>
           </h2>
 
           <div class="tabs" role="tablist" aria-label="Client code examples">
@@ -822,26 +947,26 @@ footer.site-footer a { color: var(--text-dim); }
           <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
             <h2 id="h-lanes" class="card-title" style="margin-bottom:0;">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-              Egress lanes
+              <span data-i18n="l.section">Egress lanes</span>
             </h2>
             <span class="chip" id="laneRatio">0 / 0 total</span>
           </div>
 
           <div class="table-wrapper" tabindex="0" role="region" aria-labelledby="h-lanes">
             <table>
-              <caption class="sr-only">Warm and parked egress lanes with score, latency, subnet and usage counters</caption>
+              <caption class="sr-only" data-i18n="l.caption">Warm and parked egress lanes with score, latency, subnet and usage counters</caption>
               <thead>
                 <tr>
-                  <th scope="col">Address</th>
-                  <th scope="col">Proto</th>
-                  <th scope="col">Score</th>
-                  <th scope="col">Latency</th>
-                  <th scope="col">Load</th>
-                  <th scope="col">OK / Fail</th>
+                  <th scope="col" data-i18n="l.addr">Address</th>
+                  <th scope="col" data-i18n="l.proto">Proto</th>
+                  <th scope="col" data-i18n="l.score">Score</th>
+                  <th scope="col" data-i18n="l.latency">Latency</th>
+                  <th scope="col" data-i18n="l.load">Load</th>
+                  <th scope="col" data-i18n="l.okfail">OK / Fail</th>
                 </tr>
               </thead>
               <tbody id="laneRows">
-                <tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:28px;">Discovering egress pathways…</td></tr>
+                <tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:28px;" data-i18n="l.discovering">Discovering egress pathways…</td></tr>
               </tbody>
             </table>
           </div>
@@ -849,8 +974,8 @@ footer.site-footer a { color: var(--text-dim); }
           <div class="table-foot">
             <span class="chip" id="pageInfo">—</span>
             <span style="display:flex; gap:8px;">
-              <button type="button" class="ghost-btn sm" id="btnPrev" onclick="pagePool(-1)">‹ Prev</button>
-              <button type="button" class="ghost-btn sm" id="btnNext" onclick="pagePool(1)">Next ›</button>
+              <button type="button" class="ghost-btn sm" id="btnPrev" onclick="pagePool(-1)" data-i18n="l.prev">‹ Prev</button>
+              <button type="button" class="ghost-btn sm" id="btnNext" onclick="pagePool(1)" data-i18n="l.next">Next ›</button>
             </span>
           </div>
         </section>
@@ -860,23 +985,23 @@ footer.site-footer a { color: var(--text-dim); }
           <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
             <h2 id="h-diag" class="card-title" style="margin-bottom:0;">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-              Diagnostics
+              <span data-i18n="d.section">Diagnostics</span>
             </h2>
-            <button type="button" class="ghost-btn sm" onclick="loadDiagnostics(true)">Re-run</button>
+            <button type="button" class="ghost-btn sm" onclick="loadDiagnostics(true)" data-i18n="d.rerun">Re-run</button>
           </div>
 
           <div id="diagVerdict" class="diag-verdict">
             <div>
-              <h3 id="diagTitle">Running checks…</h3>
-              <p id="diagAdvice">Collecting probe results and configuration warnings.</p>
+              <h3 id="diagTitle" data-i18n="d.running">Running checks…</h3>
+              <p id="diagAdvice" data-i18n="d.collecting">Collecting probe results and configuration warnings.</p>
             </div>
           </div>
 
           <ul class="diag-list" id="diagWarnings"></ul>
 
-          <h3 style="font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-muted); margin:16px 0 8px;">Probe failure breakdown</h3>
+          <h3 style="font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-muted); margin:16px 0 8px;" data-i18n="d.breakdown">Probe failure breakdown</h3>
           <div class="reason-grid" id="diagReasons">
-            <div class="reason-cell"><span class="n">—</span><span class="k">no data yet</span></div>
+            <div class="reason-cell"><span class="n">—</span><span class="k" data-i18n="d.nodata">no data yet</span></div>
           </div>
         </section>
       </div>
@@ -888,39 +1013,51 @@ footer.site-footer a { color: var(--text-dim); }
         <section class="card" aria-labelledby="h-settings">
           <h2 id="h-settings" class="card-title">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            Rotator settings
+            <span data-i18n="set.section">Rotator settings</span>
           </h2>
 
           <form id="settingsForm" onsubmit="saveSettings(event)" novalidate>
             <fieldset style="border:none; margin-bottom:18px;">
-              <legend class="input-label" style="margin-bottom:10px;">Upstream provider</legend>
+              <legend class="input-label" style="margin-bottom:10px;" data-i18n="set.language">Interface</legend>
+              <div class="input-container">
+                <label class="input-label" for="cfgLang" data-i18n="set.lang.label">Dashboard language</label>
+                <select class="input-element" id="cfgLang" name="ui_lang" onchange="setLang(this.value)">
+                  <option value="en">English</option>
+                  <option value="fa">فارسی</option>
+                </select>
+                <span class="field-hint" data-i18n="set.lang.hint">Applies instantly. Persian switches the layout to right-to-left; numbers stay Latin.</span>
+              </div>
+            </fieldset>
+
+            <fieldset style="border:none; margin-bottom:18px;">
+              <legend class="input-label" style="margin-bottom:10px;" data-i18n="set.upstream">Upstream provider</legend>
 
               <div class="input-container" style="margin-bottom:12px;">
-                <label class="input-label" for="cfgUpstreamUrl">Base URL</label>
+                <label class="input-label" for="cfgUpstreamUrl" data-i18n="set.baseurl">Base URL</label>
                 <input type="url" class="input-element" id="cfgUpstreamUrl" name="upstream_base_url"
                        placeholder="https://opencode.ai/zen/v1" spellcheck="false"
                        style="font-family:var(--font-mono); font-size:11.5px;">
               </div>
 
               <div class="input-container" style="margin-bottom:12px;">
-                <label class="input-label" for="cfgUpstreamKey">Upstream API key</label>
+                <label class="input-label" for="cfgUpstreamKey" data-i18n="set.upkey">Upstream API key</label>
                 <input type="password" class="input-element" id="cfgUpstreamKey" name="upstream_api_key"
                        placeholder="leave blank to keep the stored key" autocomplete="new-password"
                        style="font-family:var(--font-mono); font-size:11.5px;">
               </div>
 
               <div class="input-container">
-                <label class="input-label" for="cfgProbeModel">Probe model</label>
+                <label class="input-label" for="cfgProbeModel" data-i18n="set.probemodel">Probe model</label>
                 <input type="text" class="input-element" id="cfgProbeModel" name="probe_model"
                        list="modelList" spellcheck="false"
                        placeholder="deepseek-v4-flash-free"
                        style="font-family:var(--font-mono); font-size:11.5px;">
                 <datalist id="modelList"></datalist>
-                <span class="field-hint">Cheapest model on the upstream — used for every lane probe.</span>
+                <span class="field-hint" data-i18n="set.probemodel.hint">Cheapest model on the upstream — used for every lane probe.</span>
               </div>
 
               <div class="input-container" style="margin-top:12px;">
-                <label class="input-label" for="cfgUpstreamUA">Upstream User-Agent</label>
+                <label class="input-label" for="cfgUpstreamUA" data-i18n="set.ua">Upstream User-Agent</label>
                 <input type="text" class="input-element" id="cfgUpstreamUA" name="upstream_user_agent"
                        placeholder="opencode/1.0" spellcheck="false"
                        style="font-family:var(--font-mono); font-size:11.5px;">
@@ -932,12 +1069,12 @@ footer.site-footer a { color: var(--text-dim); }
 
             <div class="slider-group">
               <div class="slider-header">
-                <label class="slider-label" for="cfgPoolTarget">Target pool size</label>
+                <label class="slider-label" for="cfgPoolTarget" data-i18n="set.pooltarget">Target pool size</label>
                 <output class="slider-value" id="valPoolTarget" for="cfgPoolTarget">30</output>
               </div>
               <div class="slider-track-container">
                 <div class="slider-fill" id="fillPoolTarget" style="width:30%" aria-hidden="true"></div>
-                <span class="slider-track-text" aria-hidden="true">Lanes to maintain</span>
+                <span class="slider-track-text" aria-hidden="true" data-i18n="set.pooltarget.hint">Lanes to maintain</span>
                 <input type="range" class="slider-input" id="cfgPoolTarget" name="proxy_pool_target"
                        min="5" max="100" step="1" value="30" oninput="updateSlider('PoolTarget')">
               </div>
@@ -945,31 +1082,31 @@ footer.site-footer a { color: var(--text-dim); }
 
             <div class="slider-group">
               <div class="slider-header">
-                <label class="slider-label" for="cfgConcurrency">Test concurrency</label>
+                <label class="slider-label" for="cfgConcurrency" data-i18n="set.conc">Test concurrency</label>
                 <output class="slider-value" id="valConcurrency" for="cfgConcurrency">60</output>
               </div>
               <div class="slider-track-container">
                 <div class="slider-fill" id="fillConcurrency" style="width:40%" aria-hidden="true"></div>
-                <span class="slider-track-text" aria-hidden="true">Simultaneous lane checks</span>
+                <span class="slider-track-text" aria-hidden="true" data-i18n="set.conc.hint">Simultaneous lane checks</span>
                 <input type="range" class="slider-input" id="cfgConcurrency" name="proxy_test_concurrency"
                        min="5" max="150" step="1" value="60" oninput="updateSlider('Concurrency')"
                        aria-describedby="concHint">
               </div>
-              <span class="field-hint" id="concHint">Residential / CPE links: keep this at 15–25 or every probe fails.</span>
+              <span class="field-hint" id="concHint" data-i18n="set.conc.warn">Residential / CPE links: keep this at 15–25 or every probe fails.</span>
             </div>
 
             <div class="input-container" style="margin-bottom:18px;">
-              <label class="input-label" for="cfgWebshare">Webshare API tokens</label>
+              <label class="input-label" for="cfgWebshare" data-i18n="set.webshare">Webshare API tokens</label>
               <textarea class="input-element" id="cfgWebshare" name="webshare_token" rows="3" spellcheck="false"
                         placeholder="one token per line, or comma-separated"
                         style="resize:vertical; font-family:var(--font-mono); font-size:11px; background:rgba(0,0,0,0.42);"></textarea>
-              <span class="field-hint">Stored locally in settings.json (git-ignored). Shown masked after saving.</span>
+              <span class="field-hint" data-i18n="set.webshare.hint">Stored locally in settings.json (git-ignored). Shown masked after saving.</span>
             </div>
 
             <div class="toggle-container" style="margin-bottom:18px;">
               <div class="toggle-text-group">
-                <label class="toggle-label" for="cfgDirectLane">Direct connection fallback</label>
-                <span class="toggle-desc" id="directHint">Use this host's own IP when every proxy fails</span>
+                <label class="toggle-label" for="cfgDirectLane" data-i18n="set.direct">Direct connection fallback</label>
+                <span class="toggle-desc" id="directHint" data-i18n="set.direct.hint">Use this host's own IP when every proxy fails</span>
               </div>
               <span class="switch">
                 <input type="checkbox" id="cfgDirectLane" name="direct_lane" aria-describedby="directHint">
@@ -978,26 +1115,26 @@ footer.site-footer a { color: var(--text-dim); }
             </div>
 
             <details class="advanced-box">
-              <summary>Advanced settings</summary>
+              <summary data-i18n="set.advanced">Advanced settings</summary>
               <div style="display:flex; flex-direction:column; gap:16px;">
 
                 <div class="input-container">
-                  <label class="input-label" for="cfgRelayKey">Relay API key</label>
+                  <label class="input-label" for="cfgRelayKey" data-i18n="set.relaykey">Relay API key</label>
                   <div style="display:flex; gap:8px;">
                     <input type="password" class="input-element" id="cfgRelayKey" name="relay_api_key"
                            placeholder="protects the relay and this dashboard" autocomplete="new-password"
                            aria-describedby="relayKeyHint"
                            style="flex:1; font-family:var(--font-mono); font-size:11.5px;">
                     <button type="button" id="btnToggleRelayKey" class="ghost-btn"
-                            onclick="toggleRelayKeyVisibility()" aria-pressed="false">Show</button>
+                            onclick="toggleRelayKeyVisibility()" aria-pressed="false" data-i18n="set.show">Show</button>
                   </div>
-                  <span class="field-hint" id="relayKeyHint">Saving a key here applies it to the relay and stores it as this browser's key.</span>
+                  <span class="field-hint" id="relayKeyHint" data-i18n="set.relaykey.hint">Saving a key here applies it to the relay and stores it as this browser's key.</span>
                 </div>
 
                 <div class="toggle-container">
                   <div class="toggle-text-group">
-                    <label class="toggle-label" for="cfgAllowSocks">Allow SOCKS sources</label>
-                    <span class="toggle-desc" id="socksHint">Include SOCKS4/5 proxies in the candidate pool</span>
+                    <label class="toggle-label" for="cfgAllowSocks" data-i18n="set.socks">Allow SOCKS sources</label>
+                    <span class="toggle-desc" id="socksHint" data-i18n="set.socks.hint">Include SOCKS4/5 proxies in the candidate pool</span>
                   </div>
                   <span class="switch">
                     <input type="checkbox" id="cfgAllowSocks" name="allow_socks" aria-describedby="socksHint">
@@ -1007,8 +1144,8 @@ footer.site-footer a { color: var(--text-dim); }
 
                 <div class="toggle-container">
                   <div class="toggle-text-group">
-                    <label class="toggle-label" for="cfgAdaptive">Adaptive concurrency</label>
-                    <span class="toggle-desc" id="adaptHint">Back off automatically when probes fail en masse</span>
+                    <label class="toggle-label" for="cfgAdaptive" data-i18n="set.adaptive">Adaptive concurrency</label>
+                    <span class="toggle-desc" id="adaptHint" data-i18n="set.adaptive.hint">Back off automatically when probes fail en masse</span>
                   </div>
                   <span class="switch">
                     <input type="checkbox" id="cfgAdaptive" name="adaptive_concurrency" aria-describedby="adaptHint">
@@ -1018,8 +1155,8 @@ footer.site-footer a { color: var(--text-dim); }
 
                 <div class="toggle-container">
                   <div class="toggle-text-group">
-                    <label class="toggle-label" for="cfgPersist">Remember lanes across restarts</label>
-                    <span class="toggle-desc" id="persistHint">Warm-start from lanes.json instead of rebuilding the pool</span>
+                    <label class="toggle-label" for="cfgPersist" data-i18n="set.persist">Remember lanes across restarts</label>
+                    <span class="toggle-desc" id="persistHint" data-i18n="set.persist.hint">Warm-start from lanes.json instead of rebuilding the pool</span>
                   </div>
                   <span class="switch">
                     <input type="checkbox" id="cfgPersist" name="persist_lanes" aria-describedby="persistHint">
@@ -1029,63 +1166,63 @@ footer.site-footer a { color: var(--text-dim); }
 
                 <div class="advanced-grid">
                   <div class="input-container">
-                    <label class="input-label" for="cfgLaneInflight">Per-lane concurrency</label>
+                    <label class="input-label" for="cfgLaneInflight" data-i18n="set.inflight">Per-lane concurrency</label>
                     <input type="number" class="input-element" id="cfgLaneInflight" name="lane_max_inflight"
                            min="1" max="10" step="1" value="2" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgLaneInflight" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgLaneInflight" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgSubnetCap">Max lanes per /24</label>
+                    <label class="input-label" for="cfgSubnetCap" data-i18n="set.subnetcap">Max lanes per /24</label>
                     <input type="number" class="input-element" id="cfgSubnetCap" name="max_lanes_per_subnet"
                            min="1" max="20" step="1" value="3" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgSubnetCap" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgSubnetCap" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgMaxCandidates">Max candidates</label>
+                    <label class="input-label" for="cfgMaxCandidates" data-i18n="set.maxcand">Max candidates</label>
                     <input type="number" class="input-element" id="cfgMaxCandidates" name="proxy_max_candidates"
                            min="100" max="10000" step="100" value="3000" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgMaxCandidates" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgMaxCandidates" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgProbeTimeout">Probe timeout (s)</label>
+                    <label class="input-label" for="cfgProbeTimeout" data-i18n="set.probetimeout">Probe timeout (s)</label>
                     <input type="number" class="input-element" id="cfgProbeTimeout" name="proxy_probe_timeout"
                            min="5" max="60" step="1" value="25" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgProbeTimeout" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgProbeTimeout" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgRelayTimeout">Relay timeout (s)</label>
+                    <label class="input-label" for="cfgRelayTimeout" data-i18n="set.relaytimeout">Relay timeout (s)</label>
                     <input type="number" class="input-element" id="cfgRelayTimeout" name="relay_proxy_timeout"
                            min="10" max="120" step="1" value="40" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgRelayTimeout" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgRelayTimeout" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgRelayAttempts">Relay attempts</label>
+                    <label class="input-label" for="cfgRelayAttempts" data-i18n="set.attempts">Relay attempts</label>
                     <input type="number" class="input-element" id="cfgRelayAttempts" name="relay_attempts"
                            min="1" max="12" step="1" value="6" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgRelayAttempts" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgRelayAttempts" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgCooldownSec">Lane cooldown (s)</label>
+                    <label class="input-label" for="cfgCooldownSec" data-i18n="set.cooldown">Lane cooldown (s)</label>
                     <input type="number" class="input-element" id="cfgCooldownSec" name="lane_cooldown_sec"
                            min="10" max="86400" step="1" value="3600" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgCooldownSec" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgCooldownSec" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgRecoverSec">Lane recover (s)</label>
+                    <label class="input-label" for="cfgRecoverSec" data-i18n="set.recover">Lane recover (s)</label>
                     <input type="number" class="input-element" id="cfgRecoverSec" name="lane_recover_sec"
                            min="30" max="86400" step="1" value="3600" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgRecoverSec" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgRecoverSec" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgLanePinCount">Pinned lanes (drain)</label>
+                    <label class="input-label" for="cfgLanePinCount" data-i18n="set.pin">Pinned lanes (drain)</label>
                     <input type="number" class="input-element" id="cfgLanePinCount" name="lane_pin_count"
                            min="1" max="50" step="1" value="3" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgLanePinCount" style="font-family:var(--font-mono); font-size:11.5px;">
@@ -1096,46 +1233,46 @@ footer.site-footer a { color: var(--text-dim); }
             </details>
 
             <details class="config-section">
-              <summary class="config-summary">Egress supply — Tor &amp; burn memory</summary>
+              <summary class="config-summary" data-i18n="set.supply">Egress supply — Tor &amp; burn memory</summary>
               <div class="config-body">
-                <p class="config-hint">
+                <p class="config-hint" data-i18n="set.supply.note">
                   Measured: a 429'd egress IP never recovers, and one live Tor exit serves 40+
                   requests. So spent IPs are remembered instead of re-probed, and Tor circuits
                   supply fresh exits on demand (1,384 exit IPs, ~65% usable vs ~2% for scraped lists).
                 </p>
                 <div class="input-grid">
                   <div class="input-container">
-                    <label class="input-label" for="cfgTorEnabled">Tor egress lanes</label>
+                    <label class="input-label" for="cfgTorEnabled" data-i18n="set.tor">Tor egress lanes</label>
                     <select class="input-element" id="cfgTorEnabled" name="tor_enabled"
                             onchange="updateApplyDisabled()" style="font-family:var(--font-mono); font-size:11.5px;">
-                      <option value="true">enabled</option>
-                      <option value="false">disabled</option>
+                      <option value="true" data-i18n="set.enabled">enabled</option>
+                      <option value="false" data-i18n="set.disabled">disabled</option>
                     </select>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgTorLanes">Tor circuit lanes</label>
+                    <label class="input-label" for="cfgTorLanes" data-i18n="set.torlanes">Tor circuit lanes</label>
                     <input type="number" class="input-element" id="cfgTorLanes" name="tor_lanes"
                            min="0" max="200" step="1" value="12" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgTorLanes" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgTorLanes" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgTorSocksPort">Tor SOCKS port</label>
+                    <label class="input-label" for="cfgTorSocksPort" data-i18n="set.torport">Tor SOCKS port</label>
                     <input type="number" class="input-element" id="cfgTorSocksPort" name="tor_socks_port"
                            min="1" max="65535" step="1" value="9150" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgTorSocksPort" style="font-family:var(--font-mono); font-size:11.5px;">
                     <span class="field-error" id="errCfgTorSocksPort" aria-live="polite"></span>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgBurnMemory">Burn memory</label>
+                    <label class="input-label" for="cfgBurnMemory" data-i18n="set.burn">Burn memory</label>
                     <select class="input-element" id="cfgBurnMemory" name="burn_memory"
                             onchange="updateApplyDisabled()" style="font-family:var(--font-mono); font-size:11.5px;">
-                      <option value="true">remember spent IPs</option>
-                      <option value="false">disabled (re-probe everything)</option>
+                      <option value="true" data-i18n="set.burn.on">remember spent IPs</option>
+                      <option value="false" data-i18n="set.burn.off">disabled (re-probe everything)</option>
                     </select>
                   </div>
                   <div class="input-container">
-                    <label class="input-label" for="cfgBurnTtl">Burn TTL (s)</label>
+                    <label class="input-label" for="cfgBurnTtl" data-i18n="set.burnttl">Burn TTL (s)</label>
                     <input type="number" class="input-element" id="cfgBurnTtl" name="burn_ttl_sec"
                            min="60" max="2592000" step="1" value="86400" oninput="updateApplyDisabled()"
                            aria-describedby="errCfgBurnTtl" style="font-family:var(--font-mono); font-size:11.5px;">
@@ -1146,16 +1283,16 @@ footer.site-footer a { color: var(--text-dim); }
             </details>
 
             <div style="display:flex; gap:12px; margin-top:22px;">
-              <button type="submit" class="action-btn" id="btnApply" style="flex:1;">Apply &amp; save</button>
+              <button type="submit" class="action-btn" id="btnApply" style="flex:1;" data-i18n="set.apply">Apply &amp; save</button>
               <button type="button" class="action-btn" id="btnValidate" onclick="triggerKeyValidation()"
-                      style="flex:1; background:rgba(255,255,255,0.05); border:1px solid var(--surface-border-hi); color:var(--text);">Validate keys</button>
+                      style="flex:1; background:rgba(255,255,255,0.05); border:1px solid var(--surface-border-hi); color:var(--text);" data-i18n="set.validate">Validate keys</button>
             </div>
 
             <div id="keyValidationPanel" style="margin-top:16px; display:none;"
                  class="diag-verdict" role="status" aria-live="polite">
               <div style="width:100%;">
-                <h3 style="font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-muted); margin-bottom:8px;">Key verification</h3>
-                <div id="valResultUpstream" style="font-family:var(--font-mono); font-size:11.5px; margin-bottom:8px;">Upstream: pending</div>
+                <h3 style="font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-muted); margin-bottom:8px;" data-i18n="set.keyverify">Key verification</h3>
+                <div id="valResultUpstream" style="font-family:var(--font-mono); font-size:11.5px; margin-bottom:8px;" data-i18n="set.up_pending">Upstream: pending</div>
                 <div id="valResultWebshareList" style="display:flex; flex-direction:column; gap:6px; font-family:var(--font-mono); font-size:11.5px;"></div>
               </div>
             </div>
@@ -1167,26 +1304,26 @@ footer.site-footer a { color: var(--text-dim); }
           <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
             <h2 id="h-logs" class="card-title" style="margin-bottom:0;">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-              Telemetry trace
+              <span data-i18n="log.section">Telemetry trace</span>
             </h2>
             <div class="log-toolbar">
-              <label class="input-label" for="logFilter" style="text-transform:none; letter-spacing:0;">Filter</label>
+              <label class="input-label" for="logFilter" style="text-transform:none; letter-spacing:0;" data-i18n="log.filter">Filter</label>
               <input type="search" id="logFilter" class="input-element" placeholder="substring…"
                      oninput="renderLogs()" style="width:130px; padding:5px 9px; font-size:11px;">
               <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:5px; cursor:pointer;">
                 <input type="checkbox" id="logErrorsOnly" onchange="renderLogs()" style="accent-color:#ff8a90; cursor:pointer;">
-                Errors only
+                <span data-i18n="log.errors">Errors only</span>
               </label>
               <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:5px; cursor:pointer;">
                 <input type="checkbox" id="logAutoscroll" checked style="accent-color:#86ccff; cursor:pointer;">
-                Auto-scroll
+                <span data-i18n="log.autoscroll">Auto-scroll</span>
               </label>
-              <button type="button" class="ghost-btn sm" onclick="copyLogs()">Copy</button>
-              <button type="button" class="ghost-btn sm" onclick="clearLogs()">Clear</button>
+              <button type="button" class="ghost-btn sm" onclick="copyLogs()" data-i18n="log.copy">Copy</button>
+              <button type="button" class="ghost-btn sm" onclick="clearLogs()" data-i18n="log.clear">Clear</button>
             </div>
           </div>
           <div class="terminal-wrapper" id="terminalLogs" tabindex="0" role="log" aria-label="Live relay log">
-            <div class="log-entry"><span class="log-time">[system]</span>Listening for telemetry…</div>
+            <div class="log-entry"><span class="log-time">[system]</span><span data-i18n="log.listening">Listening for telemetry…</span></div>
           </div>
         </section>
       </div>
@@ -1194,7 +1331,7 @@ footer.site-footer a { color: var(--text-dim); }
   </main>
 
   <footer class="site-footer">
-    <span>ip-relay v__VERSION__ — provider-agnostic egress rotator</span>
+    <span data-i18n="foot.tagline">ip-relay v__VERSION__ — provider-agnostic egress rotator</span>
     <span id="footStatus">—</span>
   </footer>
 </div>
@@ -1202,14 +1339,14 @@ footer.site-footer a { color: var(--text-dim); }
 <!-- ══ Auth modal ══════════════════════════════════════════════ -->
 <div class="modal-backdrop" id="authModal">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle" aria-describedby="authDesc">
-    <h2 id="authTitle">Relay key required</h2>
-    <p class="modal-sub" id="authDesc">The relay rejected this request (401). Enter the relay API key to reconnect — live updates resume automatically.</p>
+    <h2 id="authTitle" data-i18n="auth.title">Relay key required</h2>
+    <p class="modal-sub" id="authDesc" data-i18n="auth.body">The relay rejected this request (401). Enter the relay API key to reconnect — live updates resume automatically.</p>
     <div class="input-container" style="margin-bottom:14px;">
       <label class="input-label" for="authKeyInput">Relay API key</label>
       <input type="password" id="authKeyInput" class="input-element" placeholder="paste key"
              autocomplete="new-password" style="font-family:var(--font-mono); font-size:12px;">
     </div>
-    <button type="button" onclick="saveAuthKey()" class="action-btn" style="width:100%;">Save &amp; retry</button>
+    <button type="button" onclick="saveAuthKey()" class="action-btn" style="width:100%;" data-i18n="auth.save">Save &amp; retry</button>
   </div>
 </div>
 
@@ -1217,9 +1354,9 @@ footer.site-footer a { color: var(--text-dim); }
 <div class="modal-backdrop" id="profileModal">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="profTitle" aria-describedby="profDesc">
     <h2 id="profTitle">Provider setup</h2>
-    <p class="modal-sub" id="profDesc">Pick an upstream to preload its base URL and probe model. Your API key is never overwritten with a blank.</p>
+    <p class="modal-sub" id="profDesc" data-i18n="prov.body">Pick an upstream to preload its base URL and probe model. Your API key is never overwritten with a blank.</p>
     <div class="profile-list" id="profileList"></div>
-    <button type="button" class="ghost-btn" onclick="closeProfiles()" style="width:100%;">Close</button>
+    <button type="button" class="ghost-btn" onclick="closeProfiles()" style="width:100%;" data-i18n="prov.close">Close</button>
   </div>
 </div>
 
@@ -1544,6 +1681,18 @@ function formatDur(sec) {
   const m = Math.floor(sec / 60);
   return m > 0 ? m + 'm ' + (sec % 60) + 's' : sec + 's';
 }
+/* v1.1: token counts reach millions fast, and a 7-digit number in a hero tile
+   destroys the layout. Compact but honest — 1.2M, 847k, 512. Digits stay ASCII
+   in both languages by design (Sajjad's Farsi rules: numerals are not
+   localised), so this function is locale-independent on purpose. */
+function fmtTokens(n) {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1).replace(/\.0$/, '') + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M';
+  if (n >= 1e4) return Math.round(n / 1e3) + 'k';
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+  return String(n);
+}
 function formatUptime(sec) {
   sec = Math.max(0, Math.round(sec || 0));
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -1715,6 +1864,15 @@ async function loadSettings() {
       setVal('cfgTorSocksPort', s.tor_socks_port ?? 9150);
       setVal('cfgBurnMemory', (s.burn_memory ?? true) ? 'true' : 'false');
       setVal('cfgBurnTtl', s.burn_ttl_sec ?? 86400);
+      /* ── language (v1.1) ──
+         English is the default; Persian is opt-in via the settings select.
+         No navigator.language sniffing: a Persian OS user who never asked for a
+         Persian dashboard must not be switched behind their back mid-session.
+         The select is hydrated from the server policy (ui_lang is a real
+         setting, persisted in settings.json) so the choice survives restarts. */
+      const lang = String(s.ui_lang ?? 'en');
+      setVal('cfgLang', lang);
+      if (lang !== currentLang) setLang(lang);
       settingsHydrated = true;
       updateApplyDisabled();
       loadModelList();
@@ -1774,7 +1932,8 @@ async function saveSettings(e) {
     tor_lanes: num('cfgTorLanes'),
     tor_socks_port: num('cfgTorSocksPort'),
     burn_memory: document.getElementById('cfgBurnMemory').value === 'true',
-    burn_ttl_sec: num('cfgBurnTtl')
+    burn_ttl_sec: num('cfgBurnTtl'),
+    ui_lang: document.getElementById('cfgLang').value
   };
 
   const relayKeyVal = String(document.getElementById('cfgRelayKey').value).trim();
@@ -1908,8 +2067,21 @@ async function loadDiagnostics(manual) {
     const title = document.getElementById('diagTitle');
     const advice = document.getElementById('diagAdvice');
     if (box) box.className = 'diag-verdict ' + (VERDICT_CLASS[d.verdict] || '');
-    if (title) title.textContent = String(d.verdict || '').replace(/_/g, ' ');
-    if (advice) advice.textContent = d.advice || '';
+    /* The server's verdict slug is the translation key; its advice prose is the
+       fallback. This way a verdict added on the backend still renders (in
+       English) instead of blanking the panel, and these two elements keep their
+       data-i18n attributes pointing at the CURRENT verdict so a language toggle
+       re-renders them correctly. */
+    const vkey = 'diag.v.' + String(d.verdict || '');
+    const akey = 'diag.a.' + String(d.verdict || '');
+    if (title) {
+      title.setAttribute('data-i18n', vkey);
+      title.textContent = t(vkey, String(d.verdict || '').replace(/_/g, ' '));
+    }
+    if (advice) {
+      advice.setAttribute('data-i18n', akey);
+      advice.textContent = t(akey, d.advice || '');
+    }
 
     const warn = document.getElementById('diagWarnings');
     if (warn) {
@@ -1988,6 +2160,35 @@ function updateTelemetry(data) {
   const tiersEl = document.getElementById('cTiers');
   if (tiersEl) tiersEl.textContent = (t.fast ?? 0) + ' fast · ' + (t.medium ?? 0) + ' med · ' + (t.slow ?? 0) + ' slow';
 
+  /* ── token meter (v1.1) ──────────────────────────────────────
+     Request counts never answered "how much of the free tier did I spend".
+     Server-side daily buckets are authoritative and survive reloads and
+     restarts, so the headline reads from data.usage, not from a client ring. */
+  const usage = data.usage || {};
+  const today = usage.today || {};
+  liveTokens = today.total ?? 0;      // reconcile the optimistic SSE counter
+  setStat('cTokens', fmtTokens(liveTokens));
+  const tokSub = document.getElementById('cTokensSub');
+  if (tokSub) tokSub.textContent = 'in ' + fmtTokens(today.in ?? 0) + ' · out ' + fmtTokens(today.out ?? 0);
+  setStat('cTokensRate', fmtTokens(Math.round(m.tpm ?? 0)));
+  const tokLife = document.getElementById('cTokensLifetime');
+  if (tokLife) {
+    const life = usage.lifetime || {};
+    tokLife.textContent = fmtTokens(life.total ?? 0) + ' lifetime · '
+      + fmtTokens(Math.round(m.avg_tokens_per_req ?? 0)) + '/req';
+  }
+  if (Array.isArray(usage.series) && usage.series.length >= 2) {
+    // Multi-day history: the daily buckets are the most honest picture.
+    drawSpark('sparkTokens', usage.series.map(d => (d.in || 0) + (d.out || 0)), '#aae8ff');
+  } else {
+    /* First day of a fresh install has ONE bucket, and drawSpark needs 2+
+       points — the tile would sit with an empty canvas for 24h. Fall back to a
+       rolling within-day ring so the sparkline is alive immediately. */
+    sparkData.tokens.push(liveTokens);
+    while (sparkData.tokens.length > SPARK_LEN) sparkData.tokens.shift();
+    drawSpark('sparkTokens', sparkData.tokens, '#aae8ff');
+  }
+
   // Egress supply: Tor circuits and the spent-IP blocklist. These decide whether
   // the pool can keep finding fresh IPs, so they belong on the main telemetry
   // line rather than buried in the settings pane.
@@ -2048,9 +2249,463 @@ function updateTelemetry(data) {
   if (data.spark) applyServerSpark(data.spark);
 }
 
+/* ── i18n ───────────────────────────────────────────────────────
+   English is the shipped default and the source text lives in the markup, so a
+   missing key degrades to readable English instead of a placeholder. Persian is
+   opt-in from settings (server-persisted as ui_lang).
+
+   Two deliberate choices:
+   * Numbers stay Latin in both languages. Persian digits in a metrics readout
+     next to monospace IPs and Latin model names are actively harder to read,
+     and every value here is telemetry, not prose.
+   * RTL uses logical CSS properties, not a mirrored stylesheet. dir="rtl" on
+     <html> flips the flex/grid axes for free; the only rules that need help are
+     the ones still using physical left/right, handled in the [dir=rtl] block. */
+/* ══ I18N-DICT-START (generated by tools/i18n_gen.py — do not edit) ══ */
+const I18N = {
+  en: {
+  "a11y.skip": "Skip to main content",
+  "attr.filter_ph": "filter…",
+  "attr.search_ph": "search address or subnet…",
+  "auth.body": "The relay rejected this request (401). Enter the relay API key to reconnect — live updates resume automatically.",
+  "auth.save": "Save & retry",
+  "auth.title": "Relay key required",
+  "d.breakdown": "Probe failure breakdown",
+  "d.collecting": "Collecting probe results and configuration warnings.",
+  "d.nodata": "no data yet",
+  "d.rerun": "Re-run",
+  "d.running": "Running checks…",
+  "d.section": "Diagnostics",
+  "diag.a.bad_upstream_key": "The upstream rejects the API key (401). Fix upstream_api_key.",
+  "diag.a.egress_blocked": "Probes cannot open outbound connections to proxy ports. A VPN, firewall, or ISP filter is blocking non-80/443 traffic, or the link's NAT table is saturated. Lower proxy_test_concurrency (15–25) and retry without the VPN.",
+  "diag.a.healthy": "Pool is serving traffic.",
+  "diag.a.no_usable_proxies": "Candidates connect but fail verification. Check the reason breakdown.",
+  "diag.a.quota_exhausted": "The key's own quota is exhausted; every IP 429s. Use a private key.",
+  "diag.a.upstream_blocks_proxies": "The upstream 403s these egress IPs (datacenter/VPN ranges are often blocked).",
+  "diag.a.warming_up": "No probe results yet — the pool is still fetching and testing candidates.",
+  "diag.v.bad_upstream_key": "bad upstream key",
+  "diag.v.egress_blocked": "egress blocked",
+  "diag.v.healthy": "healthy",
+  "diag.v.no_usable_proxies": "no usable proxies",
+  "diag.v.quota_exhausted": "quota exhausted",
+  "diag.v.upstream_blocks_proxies": "upstream blocks proxies",
+  "diag.v.warming_up": "warming up",
+  "foot.tagline": "ip-relay v__VERSION__ — provider-agnostic egress rotator",
+  "g.section": "Connect your application",
+  "hdr.baseurl": "Base URL:",
+  "hdr.connecting": "connecting…",
+  "hdr.loading": "loading…",
+  "hdr.provider_setup": "Provider setup",
+  "hdr.relay_status": "Relay status:",
+  "hdr.tagline": "resilient egress rotator",
+  "js.ago": "ago",
+  "js.burn_off": "burn off",
+  "js.burned_ips": "burned IPs",
+  "js.cleared": "Log cleared",
+  "js.cooldown": "cooldown",
+  "js.copied": "Copied to clipboard",
+  "js.diag_refreshed": "Diagnostics refreshed",
+  "js.discovering": "discovering routes…",
+  "js.errors_of": "errors /",
+  "js.failed": "failed",
+  "js.failovers": "failovers",
+  "js.fast": "fast",
+  "js.fix_invalid": "Fix the invalid fields before applying",
+  "js.idle_warm": "idle (pool warm)",
+  "js.in_prefix": "in",
+  "js.in_window": "in",
+  "js.lanes_suffix": "lanes",
+  "js.lifetime": "lifetime",
+  "js.loading": "Loading…",
+  "js.medium": "med",
+  "js.min": "min",
+  "js.models": "models",
+  "js.no_failures": "no probe failures",
+  "js.no_match": "No lines match the filter.",
+  "js.no_warnings": "No configuration warnings.",
+  "js.no_webshare": "No Webshare accounts configured.",
+  "js.now": "now",
+  "js.operational": "operational",
+  "js.out_prefix": "out",
+  "js.paused_quota": "paused (quota)",
+  "js.per_req": "/req",
+  "js.polling_fallback": "polling fallback",
+  "js.probed": "probed",
+  "js.probing": "probing",
+  "js.profiles_fail": "Could not load profiles.",
+  "js.proxies": "proxies",
+  "js.queued": "queued",
+  "js.quota_exhausted": "quota exhausted · retry in",
+  "js.refresh_started": "Proxy refresh started",
+  "js.req": "req",
+  "js.requests_total": "requests total",
+  "js.rotations": "rotations",
+  "js.saving": "Saving…",
+  "js.scraping": "scraping feeds",
+  "js.settings_saved": "Settings applied",
+  "js.slow": "slow",
+  "js.tor_off": "tor off",
+  "js.tor_unreachable": "tor UNREACHABLE",
+  "js.try": "try",
+  "js.valid": "valid",
+  "l.addr": "Address",
+  "l.caption": "Warm and parked egress lanes with score, latency, subnet and usage counters",
+  "l.discovering": "Discovering egress pathways…",
+  "l.latency": "Latency",
+  "l.load": "Load",
+  "l.next": "Next ›",
+  "l.okfail": "OK / Fail",
+  "l.prev": "‹ Prev",
+  "l.proto": "Proto",
+  "l.score": "Score",
+  "l.section": "Egress lanes",
+  "log.autoscroll": "Auto-scroll",
+  "log.clear": "Clear",
+  "log.copy": "Copy",
+  "log.errors": "Errors only",
+  "log.filter": "Filter",
+  "log.listening": "Listening for telemetry…",
+  "log.section": "Telemetry trace",
+  "m.bestlane": "Best lane",
+  "m.p95": "p95 latency",
+  "m.probes": "Probes ok / burned",
+  "m.realwidth": "real width",
+  "m.rpm": "Requests / min",
+  "m.section": "Live metrics",
+  "m.subnets": "Unique /24 subnets",
+  "m.success": "Success rate",
+  "m.supply": "Egress supply",
+  "m.supply_sub": "Tor circuits & burn memory",
+  "m.tokens_today": "Tokens today",
+  "m.tpm": "Tokens / min",
+  "m.uptime": "Uptime",
+  "m.warm": "Warm lanes",
+  "m.window5": "5 min window",
+  "prov.body": "Pick an upstream to preload its base URL and probe model. Your API key is never overwritten with a blank.",
+  "prov.close": "Close",
+  "set.adaptive": "Adaptive concurrency",
+  "set.adaptive.hint": "Back off automatically when probes fail en masse",
+  "set.advanced": "Advanced settings",
+  "set.apply": "Apply & save",
+  "set.attempts": "Relay attempts",
+  "set.baseurl": "Base URL",
+  "set.burn": "Burn memory",
+  "set.burn.off": "disabled (re-probe everything)",
+  "set.burn.on": "remember spent IPs",
+  "set.burnttl": "Burn TTL (s)",
+  "set.conc": "Test concurrency",
+  "set.conc.hint": "Simultaneous lane checks",
+  "set.conc.warn": "Residential / CPE links: keep this at 15–25 or every probe fails.",
+  "set.cooldown": "Lane cooldown (s)",
+  "set.direct": "Direct connection fallback",
+  "set.direct.hint": "Use this host's own IP when every proxy fails",
+  "set.disabled": "disabled",
+  "set.enabled": "enabled",
+  "set.inflight": "Per-lane concurrency",
+  "set.keyverify": "Key verification",
+  "set.lang.hint": "Applies instantly. Persian switches the layout to right-to-left; numbers stay Latin.",
+  "set.lang.label": "Dashboard language",
+  "set.language": "Interface",
+  "set.maxcand": "Max candidates",
+  "set.persist": "Remember lanes across restarts",
+  "set.persist.hint": "Warm-start from lanes.json instead of rebuilding the pool",
+  "set.pin": "Pinned lanes (drain)",
+  "set.pooltarget": "Target pool size",
+  "set.pooltarget.hint": "Lanes to maintain",
+  "set.probemodel": "Probe model",
+  "set.probemodel.hint": "Cheapest model on the upstream — used for every lane probe.",
+  "set.probetimeout": "Probe timeout (s)",
+  "set.recover": "Lane recover (s)",
+  "set.relaykey": "Relay API key",
+  "set.relaykey.hint": "Saving a key here applies it to the relay and stores it as this browser's key.",
+  "set.relaytimeout": "Relay timeout (s)",
+  "set.section": "Rotator settings",
+  "set.show": "Show",
+  "set.socks": "Allow SOCKS sources",
+  "set.socks.hint": "Include SOCKS4/5 proxies in the candidate pool",
+  "set.subnetcap": "Max lanes per /24",
+  "set.supply": "Egress supply — Tor & burn memory",
+  "set.supply.note": "Measured: a 429'd egress IP never recovers, and one live Tor exit serves 40+ requests. So spent IPs are remembered instead of re-probed, and Tor circuits supply fresh exits on demand (1,384 exit IPs, ~65% usable vs ~2% for scraped lists).",
+  "set.tor": "Tor egress lanes",
+  "set.torlanes": "Tor circuit lanes",
+  "set.torport": "Tor SOCKS port",
+  "set.ua": "Upstream User-Agent",
+  "set.up_pending": "Upstream: pending",
+  "set.upkey": "Upstream API key",
+  "set.upstream": "Upstream provider",
+  "set.validate": "Validate keys",
+  "set.webshare": "Webshare API tokens",
+  "set.webshare.hint": "Stored locally in settings.json (git-ignored). Shown masked after saving.",
+  "t.a11y": "Topology visualisation. The egress lanes table contains the same data in text form.",
+  "t.conc": "CONC",
+  "t.core": "relay core",
+  "t.empty": "no warm lanes yet — discovering egress pathways…",
+  "t.engine": "ENGINE",
+  "t.fails": "FAILS",
+  "t.fast": "fast <1.5s",
+  "t.idle": "idle",
+  "t.medium": "medium <4s",
+  "t.queue": "QUEUE",
+  "t.refresh": "Refresh proxies now",
+  "t.section": "Live egress topology",
+  "t.slow": "slow",
+  "t.streams": "STREAMS",
+  "t.tested": "TESTED",
+  "t.warm": "WARM"
+},
+  fa: {
+  "a11y.skip": "پرش به محتوای اصلی",
+  "attr.filter_ph": "پالایش…",
+  "attr.search_ph": "جست‌وجوی نشانی یا زیرشبکه…",
+  "auth.body": "رله این درخواست را رد کرد (401). برای اتصال مجدد کلید API رله را وارد کنید — به‌روزرسانی زنده خودکار ادامه می‌یابد.",
+  "auth.save": "ذخیره و تلاش مجدد",
+  "auth.title": "کلید رله لازم است",
+  "d.breakdown": "تفکیک خطاهای پروب",
+  "d.collecting": "گردآوری نتایج پروب و هشدارهای تنظیمات.",
+  "d.nodata": "هنوز داده‌ای نیست",
+  "d.rerun": "اجرای مجدد",
+  "d.running": "در حال بررسی…",
+  "d.section": "عیب‌یابی",
+  "diag.a.bad_upstream_key": "بالادست کلید API را رد می‌کند (401). مقدار upstream_api_key را درست کنید.",
+  "diag.a.egress_blocked": "پروب‌ها نمی‌توانند به درگاه‌های پروکسی اتصال بیرونی باز کنند. یک VPN، فایروال یا پالایه‌ی اپراتور ترافیک غیر 80/443 را می‌بندد، یا جدول NAT خط پر شده است. مقدار proxy_test_concurrency را به 15 تا 25 کم کنید و بدون VPN دوباره تلاش کنید.",
+  "diag.a.healthy": "استخر در حال سرویس‌دهی است.",
+  "diag.a.no_usable_proxies": "نامزدها وصل می‌شوند اما در بررسی رد می‌شوند. تفکیک دلایل را ببینید.",
+  "diag.a.quota_exhausted": "سهمیه‌ی خود کلید تمام شده و هر IP پاسخ 429 می‌گیرد. از یک کلید خصوصی استفاده کنید.",
+  "diag.a.upstream_blocks_proxies": "بالادست به این IPهای خروج پاسخ 403 می‌دهد؛ محدوده‌های مرکز داده و VPN اغلب بسته‌اند.",
+  "diag.a.warming_up": "هنوز نتیجه‌ی پروبی نیست — استخر همچنان نامزدها را می‌گیرد و می‌آزماید.",
+  "diag.v.bad_upstream_key": "کلید بالادست نامعتبر",
+  "diag.v.egress_blocked": "خروج مسدود است",
+  "diag.v.healthy": "سالم",
+  "diag.v.no_usable_proxies": "پروکسی قابل استفاده نیست",
+  "diag.v.quota_exhausted": "سهمیه تمام شد",
+  "diag.v.upstream_blocks_proxies": "بالادست پروکسی‌ها را رد می‌کند",
+  "diag.v.warming_up": "در حال گرم شدن",
+  "foot.tagline": "ip-relay v__VERSION__ — چرخاننده‌ی خروج مستقل از سرویس‌دهنده",
+  "g.section": "اتصال برنامه‌ی شما",
+  "hdr.baseurl": "آدرس پایه:",
+  "hdr.connecting": "در حال اتصال…",
+  "hdr.loading": "در حال بارگذاری…",
+  "hdr.provider_setup": "راه‌اندازی سرویس‌دهنده",
+  "hdr.relay_status": "وضعیت رله:",
+  "hdr.tagline": "چرخاننده‌ی مقاوم مسیر خروج",
+  "js.ago": "پیش",
+  "js.burn_off": "حافظه‌ی سوخته خاموش",
+  "js.burned_ips": "IP سوخته",
+  "js.cleared": "گزارش پاک شد",
+  "js.cooldown": "استراحت",
+  "js.copied": "در بریده‌دان رونوشت شد",
+  "js.diag_refreshed": "عیب‌یابی به‌روز شد",
+  "js.discovering": "کشف مسیرها…",
+  "js.errors_of": "خطا از",
+  "js.failed": "ناموفق",
+  "js.failovers": "جابه‌جایی اضطراری",
+  "js.fast": "سریع",
+  "js.fix_invalid": "پیش از اعمال، فیلدهای نامعتبر را درست کنید",
+  "js.idle_warm": "بی‌کار (استخر آماده)",
+  "js.in_prefix": "ورودی",
+  "js.in_window": "در",
+  "js.lanes_suffix": "مسیر",
+  "js.lifetime": "از ابتدا",
+  "js.loading": "در حال بارگذاری…",
+  "js.medium": "متوسط",
+  "js.min": "دقیقه",
+  "js.models": "مدل",
+  "js.no_failures": "خطای پروبی نیست",
+  "js.no_match": "هیچ خطی با پالایه نمی‌خواند.",
+  "js.no_warnings": "هشدار تنظیماتی نیست",
+  "js.no_webshare": "هیچ حساب Webshare تنظیم نشده است.",
+  "js.now": "اکنون",
+  "js.operational": "عملیاتی",
+  "js.out_prefix": "خروجی",
+  "js.paused_quota": "متوقف (سهمیه)",
+  "js.per_req": "به‌ازای هر درخواست",
+  "js.polling_fallback": "بازگشت به نظرسنجی دوره‌ای",
+  "js.probed": "پروب‌شده",
+  "js.probing": "در حال پروب",
+  "js.profiles_fail": "بارگذاری نمایه‌ها ممکن نشد.",
+  "js.proxies": "پروکسی",
+  "js.queued": "در صف",
+  "js.quota_exhausted": "سهمیه تمام شد · تلاش مجدد در",
+  "js.refresh_started": "به‌روزرسانی پروکسی‌ها آغاز شد",
+  "js.req": "درخواست",
+  "js.requests_total": "درخواست در کل",
+  "js.rotations": "چرخش",
+  "js.saving": "در حال ذخیره…",
+  "js.scraping": "خواندن فهرست‌ها",
+  "js.settings_saved": "تنظیمات اعمال شد",
+  "js.slow": "کند",
+  "js.tor_off": "Tor خاموش",
+  "js.tor_unreachable": "Tor دست‌نیافتنی",
+  "js.try": "تلاش",
+  "js.valid": "معتبر",
+  "l.addr": "نشانی",
+  "l.caption": "مسیرهای آماده و پارک‌شده همراه با امتیاز، تأخیر، زیرشبکه و شمارنده‌های مصرف",
+  "l.discovering": "کشف مسیرهای خروج…",
+  "l.latency": "تأخیر",
+  "l.load": "بار",
+  "l.next": "بعدی ›",
+  "l.okfail": "موفق / ناموفق",
+  "l.prev": "‹ قبلی",
+  "l.proto": "پروتکل",
+  "l.score": "امتیاز",
+  "l.section": "مسیرهای خروج",
+  "log.autoscroll": "پیمایش خودکار",
+  "log.clear": "پاک‌سازی",
+  "log.copy": "رونوشت",
+  "log.errors": "فقط خطاها",
+  "log.filter": "پالایه",
+  "log.listening": "در انتظار سنجه‌ها…",
+  "log.section": "ردیابی سنجه‌ها",
+  "m.bestlane": "بهترین مسیر",
+  "m.p95": "تأخیر p95",
+  "m.probes": "پروب موفق / سوخته",
+  "m.realwidth": "پهنای واقعی",
+  "m.rpm": "درخواست در دقیقه",
+  "m.section": "سنجه‌های زنده",
+  "m.subnets": "زیرشبکه‌های /24 یکتا",
+  "m.success": "نرخ موفقیت",
+  "m.supply": "منبع خروج",
+  "m.supply_sub": "مدارهای Tor و حافظه‌ی سوخته",
+  "m.tokens_today": "توکن امروز",
+  "m.tpm": "توکن در دقیقه",
+  "m.uptime": "زمان کارکرد",
+  "m.warm": "مسیرهای آماده",
+  "m.window5": "بازه‌ی 5 دقیقه‌ای",
+  "prov.body": "یک بالادست انتخاب کنید تا آدرس پایه و مدل پروب آن پیش‌بارگذاری شود. کلید API شما هرگز با مقدار خالی بازنویسی نمی‌شود.",
+  "prov.close": "بستن",
+  "set.adaptive": "همروندی سازگارشو",
+  "set.adaptive.hint": "وقتی پروب‌ها دسته‌جمعی شکست خوردند، خودکار عقب بکش",
+  "set.advanced": "تنظیمات پیشرفته",
+  "set.apply": "اعمال و ذخیره",
+  "set.attempts": "تلاش‌های رله",
+  "set.baseurl": "آدرس پایه",
+  "set.burn": "حافظه‌ی سوخته",
+  "set.burn.off": "غیرفعال (همه دوباره پروب شوند)",
+  "set.burn.on": "IPهای مصرف‌شده را به یاد بسپار",
+  "set.burnttl": "عمر حافظه‌ی سوخته (ثانیه)",
+  "set.conc": "همروندی آزمون",
+  "set.conc.hint": "بررسی هم‌زمان مسیرها",
+  "set.conc.warn": "روی خطوط خانگی یا CPE این مقدار را بین 15 تا 25 نگه دارید وگرنه همه‌ی پروب‌ها شکست می‌خورند.",
+  "set.cooldown": "استراحت مسیر (ثانیه)",
+  "set.direct": "اتصال مستقیم به‌عنوان جایگزین",
+  "set.direct.hint": "وقتی همه‌ی پروکسی‌ها شکست خوردند، از IP خود این میزبان استفاده کن",
+  "set.disabled": "غیرفعال",
+  "set.enabled": "فعال",
+  "set.inflight": "همروندی هر مسیر",
+  "set.keyverify": "بررسی صحت کلید",
+  "set.lang.hint": "بی‌درنگ اعمال می‌شود. فارسی چیدمان را راست‌به‌چپ می‌کند؛ اعداد لاتین می‌مانند.",
+  "set.lang.label": "زبان داشبورد",
+  "set.language": "رابط کاربری",
+  "set.maxcand": "بیشترین تعداد نامزد",
+  "set.persist": "یادآوری مسیرها پس از راه‌اندازی مجدد",
+  "set.persist.hint": "شروع گرم از lanes.json به‌جای ساخت دوباره‌ی استخر",
+  "set.pin": "مسیرهای سنجاق‌شده (تخلیه)",
+  "set.pooltarget": "اندازه‌ی هدف استخر",
+  "set.pooltarget.hint": "تعداد مسیری که نگه داشته می‌شود",
+  "set.probemodel": "مدل پروب",
+  "set.probemodel.hint": "ارزان‌ترین مدل بالادست — برای پروب همه‌ی مسیرها استفاده می‌شود.",
+  "set.probetimeout": "مهلت پروب (ثانیه)",
+  "set.recover": "بازیابی مسیر (ثانیه)",
+  "set.relaykey": "کلید API رله",
+  "set.relaykey.hint": "ذخیره‌ی کلید در این‌جا آن را روی رله اعمال می‌کند و به‌عنوان کلید همین مرورگر نگه می‌دارد.",
+  "set.relaytimeout": "مهلت رله (ثانیه)",
+  "set.section": "تنظیمات چرخاننده",
+  "set.show": "نمایش",
+  "set.socks": "پذیرش منابع SOCKS",
+  "set.socks.hint": "پروکسی‌های SOCKS4/5 هم در استخر نامزدها بیایند",
+  "set.subnetcap": "بیشترین مسیر در هر /24",
+  "set.supply": "منبع خروج — Tor و حافظه‌ی سوخته",
+  "set.supply.note": "اندازه‌گیری شد: یک IP خروج که 429 گرفته هرگز برنمی‌گردد و یک خروج زنده‌ی Tor بیش از 40 درخواست را سرویس می‌دهد. پس IPهای سوخته به‌جای پروب دوباره به یاد می‌مانند و مدارهای Tor خروج تازه را در لحظه تأمین می‌کنند (1384 آدرس خروج، حدود 65% قابل استفاده در برابر حدود 2% برای فهرست‌های اسکرپ‌شده).",
+  "set.tor": "مسیرهای خروج Tor",
+  "set.torlanes": "مسیرهای مدار Tor",
+  "set.torport": "درگاه SOCKS مربوط به Tor",
+  "set.ua": "عامل کاربر بالادست",
+  "set.up_pending": "بالادست: در انتظار",
+  "set.upkey": "کلید API بالادست",
+  "set.upstream": "سرویس‌دهنده‌ی بالادست",
+  "set.validate": "بررسی کلیدها",
+  "set.webshare": "توکن‌های API وب‌شر",
+  "set.webshare.hint": "به‌صورت محلی در settings.json ذخیره می‌شود و در git نمی‌رود. پس از ذخیره پوشیده نشان داده می‌شود.",
+  "t.a11y": "نمای توپولوژی. جدول مسیرهای خروج همین داده‌ها را به شکل متنی دارد.",
+  "t.conc": "همروندی",
+  "t.core": "هسته‌ی رله",
+  "t.empty": "هنوز مسیر آماده‌ای نیست — مسیرهای خروج در حال کشف است…",
+  "t.engine": "موتور",
+  "t.fails": "خطاها",
+  "t.fast": "سریع <1.5s",
+  "t.idle": "بی‌کار",
+  "t.medium": "متوسط <4s",
+  "t.queue": "صف",
+  "t.refresh": "به‌روزرسانی پروکسی‌ها",
+  "t.section": "توپولوژی زنده‌ی خروج",
+  "t.slow": "کند",
+  "t.streams": "استریم‌ها",
+  "t.tested": "آزموده",
+  "t.warm": "آماده"
+}
+};
+/* ══ I18N-DICT-END ══ */
+
+let currentLang = 'en';
+/* The server does a global replace of __VERSION__ across the whole document
+   before serving, so this literal arrives already substituted — and so do the
+   copies inside the generated I18N dict, which makes the replace() in setLang a
+   harmless no-op rather than a re-injection. Reading it from the DOM instead
+   would break if the badge markup ever moves. */
+const APP_VERSION = '__VERSION__';
+
+function t(key, fallback) {
+  const d = I18N[currentLang] || I18N.en;
+  const v = d[key];
+  if (v !== undefined && v !== null && v !== '') return v;
+  // Fall back through English, then the caller's literal. A key that only
+  // exists in one language must never blank out the UI.
+  const e = I18N.en[key];
+  return (e !== undefined && e !== '') ? e : (fallback !== undefined ? fallback : key);
+}
+
+function setLang(lang) {
+  if (lang !== 'en' && lang !== 'fa') lang = 'en';
+  currentLang = lang;
+  const html = document.documentElement;
+  html.lang = lang;
+  html.dir = lang === 'fa' ? 'rtl' : 'ltr';
+
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    const val = t(key, null);
+    if (val === null) return;
+    /* textContent, not innerHTML: these strings come from a generated dict but
+       treating them as markup would be a needless injection surface, and the
+       version token is the only dynamic part. */
+    el.textContent = val.replace('__VERSION__', APP_VERSION);
+  });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+    el.placeholder = t(el.getAttribute('data-i18n-ph'), el.placeholder);
+  });
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => {
+    el.setAttribute('aria-label', t(el.getAttribute('data-i18n-aria'),
+                                    el.getAttribute('aria-label')));
+  });
+
+  /* Re-render the JS-built regions: their strings were baked at draw time in the
+     previous language, so a toggle has to redraw rather than translate in place.
+     These are the real render entry points in this file — refreshPool() redraws
+     the lane table and its chips, renderGuide() the connect snippets, and
+     renderLogs() the telemetry pane. Guarded because setLang also runs during
+     boot, before every one of them is defined. */
+  try { renderLogs(); } catch (e) {}
+  try { renderGuide(); } catch (e) {}
+  try { refreshPool(); } catch (e) {}
+  try { loadDiagnostics(); } catch (e) {}
+  /* The topology labels are drawn on canvas, so nudge a redraw. */
+  try { netDirty = true; shaderTouch(); } catch (e) {}
+}
+
 /* ── sparklines ─────────────────────────────────────────────── */
 const SPARK_LEN = 40;
-const sparkData = { warm: [], rpm: [], p95: [] };
+const sparkData = { warm: [], rpm: [], p95: [], tokens: [] };
+let liveTokens = 0;   // v1.1: today's token total, bumped by SSE between polls
 
 function pushSpark(warm, rpm, p95) {
   sparkData.warm.push(warm); sparkData.rpm.push(rpm); sparkData.p95.push(p95);
@@ -2324,6 +2979,13 @@ function connectSSE() {
 
 function handleEvent(evt) {
   noteSuccess();
+  /* Relay traffic counts as activity: a request arriving means the operator has
+     something to watch, so the backdrop comes back to life with it. 'hello' and
+     heartbeats are excluded — those fire with no traffic. */
+  if (evt.kind === 'request' || evt.kind === 'usage' || evt.kind === 'lane_up'
+      || evt.kind === 'lane_down' || evt.kind === 'churn') {
+    if (typeof shaderTouch === 'function') shaderTouch();
+  }
   switch (evt.kind) {
     case 'hello':
       if (evt.pool) updateTelemetry({ pool: evt.pool, stats: {}, version: evt.version });
@@ -2341,6 +3003,21 @@ function handleEvent(evt) {
       // Fire a particle for the exact lane that served the request. This is
       // what makes the visualiser real telemetry instead of decoration.
       bumpNode(evt.lane, evt.status === 200 ? 'hit' : 'err');
+      break;
+    case 'usage':
+      /* v1.1: tokens are only known when a stream finishes, so they arrive as
+         their own event after the request event. Bump the headline optimistically
+         so the number moves the moment the spend happens; the next /api/stats
+         reconcile (server buckets) remains authoritative. */
+      if (evt.tok_in || evt.tok_out) {
+        const el = document.getElementById('cTokens');
+        if (el) {
+          liveTokens += (evt.tok_in || 0) + (evt.tok_out || 0);
+          setStat('cTokens', fmtTokens(liveTokens));
+        }
+        const n = netNodes.find(x => x.addr === evt.lane);
+        if (n) n.pulse = 1;      // the lane that spent it glows
+      }
       break;
     case 'churn':
       poolDirty = true;
@@ -2361,10 +3038,37 @@ function handleEvent(evt) {
 /* ── network topology visualiser (event-driven) ─────────────── */
 const netCanvas = document.getElementById('networkCanvas');
 const netCtx = netCanvas ? netCanvas.getContext('2d') : null;
+/* v1.1 gooey layer. The liquid-merge look (gooey.jakubantalik.com) is a blur
+   pass followed by a hard contrast boost: blurred edges of two nearby shapes
+   sum above the contrast threshold and fuse into one body, so lanes visibly
+   MELT into the relay core as they close in. Drawn on an offscreen canvas and
+   composited once per frame — the filter runs on one card-sized surface, not
+   on 22 live DOM regions like the old backdrop-filter did.
+
+   MEASURED: at full resolution this cost 200ms/frame on a GPU-less box (vs
+   66ms without it) — software blur is per-pixel, so it has to be rendered
+   SMALL. At GOO_SCALE the blob field is drawn on a surface a quarter of the
+   area and upscaled on composite. A blurred, contrast-snapped blob field has no
+   high-frequency detail to lose, so the upscale is invisible; the blur radius
+   is scaled with it to keep the fusion distance identical in CSS pixels. */
+const GOO_SCALE = 0.5;
+const GOO_BLUR = 7;            // CSS px; divided by GOO_SCALE internally
+const gooCanvas = netCanvas ? document.createElement('canvas') : null;
+const gooCtx = gooCanvas ? gooCanvas.getContext('2d') : null;
+let gooSupported = false;
+if (gooCtx) {
+  // ctx.filter is Chrome/Edge/Firefox; Safari lacks it. Feature-detect by
+  // assignment instead of UA sniffing, and fall back to the plain draw.
+  try { gooCtx.filter = 'blur(4px)'; gooSupported = gooCtx.filter !== 'none'; } catch (e) { gooSupported = false; }
+  gooCtx.filter = 'none';
+}
 let netNodes = [];
 let netParticles = [];
 let globalTime = 0;
 let vizRunning = false;
+let netVisible = true;        // tab visibility
+let netOnScreen = true;       // card scrolled into view
+let netLastTs = 0;            // for delta time
 
 function resizeNetCanvas() {
   if (!netCanvas || !netCtx) return;
@@ -2374,6 +3078,44 @@ function resizeNetCanvas() {
   netCanvas.height = Math.max(1, Math.round(rect.height * dpr));
   // setTransform (not scale) so repeated resizes don't compound the scale
   netCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (gooCanvas) {
+    // Quarter-area backing store; the transform maps CSS px onto it so all the
+    // drawing code below stays in CSS coordinates.
+    gooCanvas.width = Math.max(1, Math.round(netCanvas.width * GOO_SCALE));
+    gooCanvas.height = Math.max(1, Math.round(netCanvas.height * GOO_SCALE));
+    const gs = dpr * GOO_SCALE;
+    gooCtx.setTransform(gs, 0, 0, gs, 0, 0);
+  }
+}
+
+/* v1.1: the canvas only listened to window.resize, so any layout reflow that
+   changed the card's height WITHOUT a window resize (settings pane opening,
+   lane-table pagination, language switch changing text metrics) left a stale
+   backing store and the visualisation rendered stretched until you resized the
+   browser. That was a large part of "glitchy". */
+if (netCanvas && 'ResizeObserver' in window) {
+  let roRaf = 0;
+  new ResizeObserver(() => {
+    // Coalesce: a reflow can fire this several times in one frame, and
+    // resizing a canvas clears it.
+    if (roRaf) return;
+    roRaf = requestAnimationFrame(() => { roRaf = 0; resizeNetCanvas(); });
+  }).observe(netCanvas);
+}
+
+/* Don't animate what nobody is looking at. The shader loop already had a
+   visibility guard; the topology loop did not — measured 17 frames in 3s with
+   document.hidden === true. IntersectionObserver adds the scroll case: the viz
+   sits above 2+ viewports of content. */
+document.addEventListener('visibilitychange', () => {
+  netVisible = !document.hidden;
+  if (netVisible && netOnScreen && !vizRunning) startNetLoop();
+});
+if (netCanvas && 'IntersectionObserver' in window) {
+  new IntersectionObserver(entries => {
+    netOnScreen = entries.some(e => e.isIntersecting);
+    if (netVisible && netOnScreen && !vizRunning) startNetLoop();
+  }, { threshold: 0.01 }).observe(netCanvas);
 }
 
 function vizDims() {
@@ -2395,25 +3137,37 @@ function syncNetworkGraph(warmLanes) {
   const updated = [];
 
   warmLanes.forEach((ln, i) => {
-    const count = Math.max(warmLanes.length, 1);
     let node = existing.get(ln.addr);
     const color = tierColor(ln.lat_ms);
     if (!node) {
       node = {
         addr: ln.addr,
-        angle: (i / count) * Math.PI * 2,
-        layer: i % 2,
-        speed: 0.00035 + Math.random() * 0.0004,
+        angle: (i / Math.max(warmLanes.length, 1)) * Math.PI * 2,
+        speed: 0.02 + Math.random() * 0.024,   // rad/sec (was rad/frame)
         x: cx + (Math.random() - 0.5) * 150,
         y: cy + (Math.random() - 0.5) * 80,
-        color: color, pulse: 0, z: 0
+        color: color, pulse: 0, z: 0, blend: 0
       };
     } else {
       node.color = color;
     }
+    node.layer = i % 2;
     node.subnet = ln.subnet;
     node.load = (ln.inflight || 0) / Math.max(1, ln.capacity || 1);
     updated.push(node);
+  });
+
+  /* v1.1: redistribute the ring on EVERY sync. Angles used to be assigned only
+     at creation, so with lanes churning (16 warm / 60 parked here) the ring went
+     progressively lumpy and never recovered. Each node now gets an even target
+     slot it eases toward, preserving its current position as the starting point
+     so the correction is a glide, not a jump. Sorting by address keeps slot
+     assignment stable across syncs instead of reshuffling on every poll. */
+  updated.sort((a, b) => (a.addr < b.addr ? -1 : a.addr > b.addr ? 1 : 0));
+  const n = Math.max(updated.length, 1);
+  updated.forEach((node, i) => {
+    node.targetAngle = (i / n) * Math.PI * 2;
+    if (node.angle === undefined) node.angle = node.targetAngle;
   });
 
   netNodes = updated;
@@ -2430,7 +3184,7 @@ function bumpNode(addr, kind) {
   if (REDUCED_MOTION) { node.pulse = 0.6; return; }
   netParticles.push({
     target: node, progress: 0,
-    speed: 0.02 + Math.random() * 0.02,
+    speed: 1.1 + Math.random() * 1.1,          // progress/sec (was per frame)
     err: kind === 'err',
     cpX: w / 2 + (Math.random() - 0.5) * 90,
     cpY: h / 2 + (Math.random() - 0.5) * 90
@@ -2438,30 +3192,131 @@ function bumpNode(addr, kind) {
   if (netParticles.length > 120) netParticles.shift();
 }
 
-function animNetworkGraph() {
+function startNetLoop() {
+  if (vizRunning) return;
+  vizRunning = true;
+  netLastTs = 0;
+  requestAnimationFrame(animNetworkGraph);
+}
+
+function animNetworkGraph(ts) {
+  if (!netVisible || !netOnScreen) { vizRunning = false; return; }
   if (!netCtx || !netCanvas.width) { requestAnimationFrame(animNetworkGraph); return; }
+
+  /* ── delta time ──────────────────────────────────────────────
+     Every animation used to be a fixed step per FRAME (n.angle += n.speed,
+     globalTime += 0.005, pulse -= 0.025). On a slow frame the whole scene
+     lurched; at 20fps it ran 3x slower than at 60fps. Now speeds are per
+     SECOND and scaled by real elapsed time, so the motion is identical at any
+     frame rate. dt is clamped: a backgrounded tab or a GC pause would
+     otherwise deliver a multi-second dt and teleport everything. */
+  ts = ts || 0;
+  let dt = netLastTs ? (ts - netLastTs) / 1000 : 0.016;
+  netLastTs = ts;
+  if (dt > 0.1) dt = 0.1;
+  if (dt <= 0) dt = 0.016;
+
   const { w: cw, h: ch } = vizDims();
   netCtx.clearRect(0, 0, cw, ch);
-  globalTime += 0.005;
+  globalTime += dt;
 
   const cx = cw / 2, cy = ch / 2;
   const rx = cw * 0.38, ry = ch * 0.26;
 
   netNodes.forEach(n => {
-    if (!REDUCED_MOTION) n.angle += n.speed;
-    const z = Math.cos(n.angle + n.layer * Math.PI * 0.5);
-    n.tx = cx + Math.sin(n.angle + n.layer * Math.PI * 0.5) * rx;
+    if (!REDUCED_MOTION) n.angle += n.speed * dt;
+    // Ease toward the evenly-spaced slot along the SHORT way around the circle.
+    if (n.targetAngle !== undefined) {
+      const TAU = Math.PI * 2;
+      let d = ((n.targetAngle - n.angle) % TAU + TAU + Math.PI) % TAU - Math.PI;
+      // exponential approach, frame-rate independent
+      n.angle += d * (1 - Math.exp(-1.6 * dt));
+    }
+    const phase = n.angle + n.layer * Math.PI * 0.5;
+    const z = Math.cos(phase);
+    n.tx = cx + Math.sin(phase) * rx;
     n.ty = cy + z * ry + (n.layer === 0 ? -12 : 12);
     n.z = z;
-    n.x += (n.tx - n.x) * 0.08;
-    n.y += (n.ty - n.y) * 0.08;
+    // Same easing rewritten as a time constant instead of a per-frame 0.08.
+    const k = 1 - Math.exp(-5.2 * dt);
+    n.x += (n.tx - n.x) * k;
+    n.y += (n.ty - n.y) * k;
+    // How close to the core, 0..1 — drives the gooey merge.
+    const dist = Math.hypot(n.x - cx, n.y - cy);
+    n.blend = Math.max(0, 1 - dist / Math.max(1, rx * 0.9));
   });
+
+  netNodes.sort((a, b) => a.z - b.z);
+
+  /* ── gooey pass ──────────────────────────────────────────────
+     Blobs go on the offscreen surface, get blurred, then a contrast curve
+     snaps the blur back to hard edges. Where two blurred fields overlap they
+     fuse — the liquid-merge effect. Everything crisp (core label, particles,
+     highlights) is drawn afterwards on the main canvas, unfiltered, so text
+     stays sharp. */
+  const goo = gooSupported && !REDUCED_MOTION;
+  if (goo) {
+    const gs = (window.devicePixelRatio || 1) * GOO_SCALE;
+    gooCtx.setTransform(gs, 0, 0, gs, 0, 0);
+    gooCtx.filter = 'none';
+    gooCtx.clearRect(0, 0, cw, ch);
+    // Blur radius scaled with the surface so fusion distance is unchanged.
+    gooCtx.filter = 'blur(' + (GOO_BLUR / GOO_SCALE).toFixed(1) + 'px) contrast(16)';
+    gooCtx.globalCompositeOperation = 'source-over';
+
+    // core body — the mass everything melts into
+    gooCtx.fillStyle = 'rgba(251,251,251,0.92)';
+    gooCtx.beginPath();
+    gooCtx.arc(cx, cy, 11, 0, Math.PI * 2);
+    gooCtx.fill();
+
+    netNodes.forEach(n => {
+      const scale = (n.z + 1.8) / 2.8;
+      const radius = 3.6 * scale * (1 + (n.load || 0) * 0.55);
+      // A tapered neck toward the core: as blend rises the neck thickens and
+      // the contrast pass fuses node and core into one liquid body.
+      if (n.blend > 0.04) {
+        const neck = radius * (0.35 + n.blend * 0.95);
+        const mx = cx + (n.x - cx) * 0.5, my = cy + (n.y - cy) * 0.5;
+        gooCtx.strokeStyle = hexA(n.color, 0.85);
+        gooCtx.lineWidth = neck;
+        gooCtx.lineCap = 'round';
+        gooCtx.beginPath();
+        gooCtx.moveTo(cx, cy);
+        gooCtx.quadraticCurveTo(mx, my, n.x, n.y);
+        gooCtx.stroke();
+      }
+      gooCtx.fillStyle = hexA(n.color, 0.95);
+      gooCtx.beginPath();
+      gooCtx.arc(n.x, n.y, radius * 1.5, 0, Math.PI * 2);
+      gooCtx.fill();
+    });
+
+    // Particles are part of the liquid: they read as droplets travelling the
+    // neck and being absorbed, instead of dots sliding over a line.
+    netParticles.forEach(p => {
+      const t = p.progress;
+      const px = (1 - t) * (1 - t) * cx + 2 * (1 - t) * t * p.cpX + t * t * p.target.x;
+      const py = (1 - t) * (1 - t) * cy + 2 * (1 - t) * t * p.cpY + t * t * p.target.y;
+      const scale = (p.target.z + 1.8) / 2.8;
+      gooCtx.fillStyle = p.err ? 'rgba(255,138,144,0.95)' : hexA(p.target.color, 0.95);
+      gooCtx.beginPath();
+      gooCtx.arc(px, py, 3.4 * scale, 0, Math.PI * 2);
+      gooCtx.fill();
+    });
+
+    gooCtx.filter = 'none';
+    netCtx.save();
+    netCtx.globalAlpha = 0.9;
+    // drawImage takes device pixels; the main ctx is DPR-scaled, so draw in CSS px.
+    netCtx.drawImage(gooCanvas, 0, 0, cw, ch);
+    netCtx.restore();
+  }
 
   netCtx.save();
   netCtx.globalCompositeOperation = 'screen';
-  netNodes.sort((a, b) => a.z - b.z);
 
-  // beams
+  // beams — kept, but thinner when the goo layer already carries the mass
   netNodes.forEach(n => {
     const alpha = (n.z + 1.2) / 2.2;
     netCtx.beginPath();
@@ -2469,9 +3324,9 @@ function animNetworkGraph() {
     netCtx.quadraticCurveTo(cx + (n.x - cx) * 0.4, cy + (n.y - cy) * 0.7, n.x, n.y);
     const grad = netCtx.createLinearGradient(cx, cy, n.x, n.y);
     grad.addColorStop(0, 'rgba(251,251,251,0.05)');
-    grad.addColorStop(1, hexA(n.color, 0.13 * alpha));
+    grad.addColorStop(1, hexA(n.color, (goo ? 0.09 : 0.13) * alpha));
     netCtx.strokeStyle = grad;
-    netCtx.lineWidth = 1 + (n.z + 1) * 0.5;
+    netCtx.lineWidth = (goo ? 0.7 : 1) + (n.z + 1) * 0.5;
     netCtx.stroke();
   });
 
@@ -2481,8 +3336,12 @@ function animNetworkGraph() {
     const radius = 3.5 * scale * (1 + (n.load || 0) * 0.5);
     const alpha = (n.z + 1.2) / 2.2;
 
-    netCtx.shadowBlur = 10 * scale;
-    netCtx.shadowColor = n.color;
+    if (!goo) {
+      // shadowBlur is the expensive path; only needed when the goo layer is
+      // unavailable and the glow has to come from somewhere.
+      netCtx.shadowBlur = 10 * scale;
+      netCtx.shadowColor = n.color;
+    }
     netCtx.fillStyle = n.color;
     netCtx.globalAlpha = 0.85 * alpha;
     netCtx.beginPath();
@@ -2508,7 +3367,8 @@ function animNetworkGraph() {
         netCtx.arc(n.x, n.y, radius + (1 - n.pulse) * 32, 0, Math.PI * 2);
         netCtx.stroke();
       }
-      n.pulse -= 0.025;
+      n.pulse -= 1.5 * dt;                    // was 0.025 per frame ≈ 1.5/s
+      if (n.pulse < 0) n.pulse = 0;
       netCtx.globalAlpha = 1;
     }
   });
@@ -2516,14 +3376,13 @@ function animNetworkGraph() {
   // particles
   for (let i = netParticles.length - 1; i >= 0; i--) {
     const p = netParticles[i];
-    p.progress += p.speed;
+    p.progress += p.speed * dt;
     const t = p.progress;
     const px = (1 - t) * (1 - t) * cx + 2 * (1 - t) * t * p.cpX + t * t * p.target.x;
     const py = (1 - t) * (1 - t) * cy + 2 * (1 - t) * t * p.cpY + t * t * p.target.y;
     const scale = (p.target.z + 1.8) / 2.8;
     const col = p.err ? '#ff8a90' : p.target.color;
-    netCtx.shadowBlur = 8 * scale;
-    netCtx.shadowColor = col;
+    if (!goo) { netCtx.shadowBlur = 8 * scale; netCtx.shadowColor = col; }
     netCtx.fillStyle = col;
     netCtx.beginPath();
     netCtx.arc(px, py, 2.2 * scale, 0, Math.PI * 2);
@@ -2544,6 +3403,8 @@ function animNetworkGraph() {
   netCtx.fillStyle = '#a1a1aa';
   netCtx.font = '8px monospace';
   netCtx.textAlign = 'center';
+  // Label stays LTR/ASCII even under dir=rtl — canvas text follows ctx.direction.
+  netCtx.direction = 'ltr';
   netCtx.fillText('RELAY CORE', cx, cy + 21);
   netCtx.restore();
 
@@ -2629,24 +3490,42 @@ function initShader() {
   const timeLoc = gl.getUniformLocation(program, 'u_time');
 
   function resize() {
-    // Cap the DPR: a 4K retina viewport at dpr 3 renders 12M fragments/frame
-    // for a background gradient, which pegs the GPU on laptops.
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    canvas.width = Math.round(window.innerWidth * dpr);
-    canvas.height = Math.round(window.innerHeight * dpr);
+    /* v1.1: render the backdrop at HALF resolution and let the compositor
+       scale it up. It is a slow-moving liquid gradient — there is no detail to
+       lose — and fragment count is quadratic in scale, so 0.5x is a 4x cut on
+       the single most expensive thing in the page. The CSS size is unchanged
+       (canvas is width:100%/height:100%), only the backing store shrinks. */
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5) * SHADER_SCALE;
+    canvas.width = Math.max(1, Math.round(window.innerWidth * dpr));
+    canvas.height = Math.max(1, Math.round(window.innerHeight * dpr));
     gl.viewport(0, 0, canvas.width, canvas.height);
   }
   window.addEventListener('resize', resize);
   resize();
 
   let visible = true;
+  let lastDraw = 0;
   document.addEventListener('visibilitychange', () => {
     visible = !document.hidden;
-    if (visible) requestAnimationFrame(render);
+    if (visible && !shaderPaused) requestAnimationFrame(render);
   });
 
+  /* Pause hook, used when a modal is open (its backdrop-filter is the only
+     live blur left, and re-blurring a moving shader is exactly the
+     multiplication this release removes) and when the tab is idle. */
+  shaderResume = () => { if (!shaderPaused && visible) requestAnimationFrame(render); };
+
   function render(time) {
-    if (!visible) return;                   // don't burn GPU in a hidden tab
+    if (!visible || shaderPaused) return;             // don't burn GPU unseen
+    /* Idle freeze: after SHADER_IDLE_MS of no touch, stop scheduling. The
+       gradient is static art when nothing is happening; a frozen canvas costs
+       ~0. (shaderTouch bumps the stamp when the page comes back to life.) */
+    if (performance.now() - shaderIdleSince > SHADER_IDLE_MS) return;
+    /* Ambient motion does not need 60fps. Throttling to ~30 halves the shader's
+       share of the frame budget and is visually indistinguishable on a gradient
+       that takes seconds to evolve. */
+    if (time - lastDraw < SHADER_MIN_MS) { requestAnimationFrame(render); return; }
+    lastDraw = time;
     gl.uniform2f(resLoc, canvas.width, canvas.height);
     gl.uniform1f(timeLoc, time * 0.001);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -2656,6 +3535,35 @@ function initShader() {
 }
 
 /* ── boot ───────────────────────────────────────────────────── */
+/* v1.1 shader knobs, module scope so the perf probe can read them. */
+let SHADER_SCALE = 0.5;        // render the backdrop at half resolution
+let SHADER_MIN_MS = 33;        // ~30 fps cap for the ambient gradient
+let shaderPaused = false;      // set true while a modal is open
+let shaderResume = null;       // wired in initShader()
+let shaderIdleSince = 0;       // last time the shader actually drew
+
+/* v1.1 idle pause: the ambient gradient is decoration, not telemetry. When
+   nothing has moved for SHADER_IDLE_MS (no telemetry tick, no interaction) it
+   freezes on the last frame — a static backdrop costs zero — and resumes the
+   instant the page becomes busy again. The perf probe drives this via the
+   existing telemetry interval, so "as shipped" measures the LIVE state. */
+const SHADER_IDLE_MS = 4000;
+
+function shaderTouch() {
+  /* Resume when the loop has already stopped itself. The stamp is checked
+     against the SAME threshold render() uses, so "loop is dead" and "needs a
+     kick" can never disagree — an === 0 sentinel would miss every wake after
+     the first idle period. */
+  const dead = performance.now() - shaderIdleSince > SHADER_IDLE_MS;
+  shaderIdleSince = performance.now();
+  if (dead && !shaderPaused && shaderResume) shaderResume();
+}
+
+function setShaderPaused(p) {
+  if (p === shaderPaused) return;
+  shaderPaused = p;
+  if (!p && shaderResume) shaderResume();
+}
 window.addEventListener('DOMContentLoaded', () => {
   const form = document.getElementById('settingsForm');
   if (form) form.addEventListener('input', () => { settingsSeq++; });
@@ -2668,12 +3576,27 @@ window.addEventListener('DOMContentLoaded', () => {
       if (e.target === m) { if (m.id === 'authModal') closeAuthModal(); else closeModal(m.id); }
     });
   });
+  /* v1.1: pause the backdrop while a modal is open so the one surviving
+     backdrop-filter never has to re-blur a moving shader. */
+  const modalRoot = document.querySelector('.modal-backdrop');
+  if (modalRoot && 'MutationObserver' in window) {
+    new MutationObserver(() => setShaderPaused(modalRoot.classList.contains('open'))).observe(modalRoot, { attributes: true, attributeFilter: ['class'] });
+  }
+
+  /* v1.1: wake the backdrop on real activity only — pointer/keyboard/scroll,
+     and relay traffic via handleEvent(). Deliberately NOT the telemetry poll:
+     that ticks every few seconds forever, so touching it there would mean the
+     shader never idles and the pause would be decorative. */
+  ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'].forEach(ev =>
+    window.addEventListener(ev, shaderTouch, { passive: true }));
+  window.addEventListener('scroll', shaderTouch, { passive: true });
+  shaderTouch();          // start the clock; the boot burst counts as activity
 
   wireTablist();
   initShader();
   renderGuide();
   resizeNetCanvas();
-  animNetworkGraph();
+  startNetLoop();
   window.addEventListener('resize', resizeNetCanvas);
 
   loadSettings();

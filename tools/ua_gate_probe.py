@@ -6,7 +6,11 @@ then alternate opencode-UA / other-UA requests through THAT one IP. If the gate
 is the UA, the opencode ones pass while the others 429 on the same IP, in the
 same seconds. If the gate is purely the IP, both behave identically.
 """
-import json, sys, time, urllib.request, urllib.error
+import json
+import sys
+import time
+import urllib.request
+import urllib.error
 
 S = json.load(open('/root/opencode-rotator/settings.json'))
 RELAY_KEY = S['relay_api_key']
@@ -16,7 +20,8 @@ BASE = S['upstream_base_url']
 req = urllib.request.Request("http://127.0.0.1:18080/api/pool",
                              headers={"Authorization": f"Bearer {RELAY_KEY}"})
 pool = json.load(urllib.request.urlopen(req, timeout=15))
-warm = [l for l in pool['warm'] if l['proto'] in ('http', 'https', 'socks5', 'socks4')]
+warm = [lane for lane in pool['warm']
+        if lane['proto'] in ('http', 'https', 'socks5', 'socks4')]
 if not warm:
     sys.exit("no warm lanes in the pool right now — rerun in a minute")
 lane = warm[0]

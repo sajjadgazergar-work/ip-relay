@@ -15,6 +15,13 @@ lanes.json.tmp
 burned.json
 burned.json.tmp
 
+# Token-usage DB is the same kind of per-host live state as burned.json — it
+# would drift instantly on another machine and its history is not a source file.
+usage.json
+usage.json.tmp
+
 # Playwright verification screenshots — regenerate with
-# tools/verify_dashboard_v10.py, don't version 1.5MB of PNGs.
+# tools/verify_dashboard_v10.py / tools/make_screenshots.py, don't version
+# multi-MB PNGs of ephemeral UI state.
 artifacts/
+*.png
