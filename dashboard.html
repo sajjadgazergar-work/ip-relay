@@ -1665,9 +1665,11 @@ function onFetchError(e, ctx) {
 
 function setFeed(state, text) {
   const pill = document.getElementById('feedPill');
-  const t = document.getElementById('feedText');
+  // Not `t` — that identifier is the global translator; shadowing it inside any
+  // function that might later call t() is a latent TDZ error.
+  const label = document.getElementById('feedText');
   if (pill) pill.className = 'feed-pill' + (state === 'live' ? '' : ' ' + state);
-  if (t) t.textContent = text;
+  if (label) label.textContent = text;
 }
 
 /* ── formatting helpers ─────────────────────────────────────── */
@@ -2139,26 +2141,32 @@ function updateTelemetry(data) {
 
   const cap = pool.capacity ?? 0;
   const sub = document.getElementById('cWarmSub');
-  if (sub) sub.textContent = (pool.parked ?? 0) + ' parked · ' + cap + ' slots';
+  if (sub) sub.textContent = (pool.parked ?? 0) + ' ' + t('js.parked') + ' · ' + cap + ' ' + t('js.slots');
   const subs = document.getElementById('cSubnetsSub');
   if (subs) {
     const w = pool.warm ?? 0, n = pool.subnets ?? 0;
     subs.textContent = (w > 0 && n > 0 && w / n >= 2)
-      ? 'concentrated — ' + (w / n).toFixed(1) + ' lanes per /24'
-      : 'real pool width';
+      ? t('js.concentrated') + ' — ' + (w / n).toFixed(1) + ' ' + t('js.lanes_per_24')
+      : t('js.real_pool_width');
   }
   const rpmSub = document.getElementById('cRpmSub');
-  if (rpmSub) rpmSub.textContent = (m.requests ?? 0) + ' in ' + Math.round((m.window_sec || 300) / 60) + ' min';
+  if (rpmSub) rpmSub.textContent = (m.requests ?? 0) + ' ' + t('js.in_window') + ' '
+    + Math.round((m.window_sec || 300) / 60) + ' ' + t('js.min');
   const reqTotal = document.getElementById('cReqTotal');
-  if (reqTotal) reqTotal.textContent = (stats.requests ?? 0) + ' requests total';
+  if (reqTotal) reqTotal.textContent = (stats.requests ?? 0) + ' ' + t('js.requests_total');
   const failEl = document.getElementById('cFailovers');
-  if (failEl) failEl.textContent = (stats.failovers ?? 0) + ' failovers';
+  if (failEl) failEl.textContent = (stats.failovers ?? 0) + ' ' + t('js.failovers');
   const succSub = document.getElementById('cSuccessSub');
-  if (succSub) succSub.textContent = (m.errors ?? 0) + ' errors / ' + (m.requests ?? 0) + ' req';
+  if (succSub) succSub.textContent = (m.errors ?? 0) + ' ' + t('js.errors_of') + ' ' + (m.requests ?? 0) + ' ' + t('js.req');
 
-  const t = pool.tiers || {};
+  /* Named `tiers`, not `t` — a block-scoped `const t` here shadows the global
+     t() translator for the WHOLE function body, so the t('js.parked') calls
+     above threw "Cannot access 't' before initialization" (TDZ). The browser
+     harness caught it; a diff read would not have. */
+  const tiers = pool.tiers || {};
   const tiersEl = document.getElementById('cTiers');
-  if (tiersEl) tiersEl.textContent = (t.fast ?? 0) + ' fast · ' + (t.medium ?? 0) + ' med · ' + (t.slow ?? 0) + ' slow';
+  if (tiersEl) tiersEl.textContent = (tiers.fast ?? 0) + ' ' + t('js.fast') + ' · '
+    + (tiers.medium ?? 0) + ' ' + t('js.medium') + ' · ' + (tiers.slow ?? 0) + ' ' + t('js.slow');
 
   /* ── token meter (v1.1) ──────────────────────────────────────
      Request counts never answered "how much of the free tier did I spend".
@@ -2228,15 +2236,15 @@ function updateTelemetry(data) {
 
   const es = document.getElementById('engineState');
   if (es) {
-    if (quota.exhausted) { es.textContent = 'paused (quota)'; es.style.color = 'var(--bad)'; }
-    else if ((pool.queue ?? 0) > 0) { es.textContent = 'probing (' + pool.queue + ' queued)'; es.style.color = 'var(--warn)'; }
-    else if ((pool.warm ?? 0) >= poolTarget) { es.textContent = 'idle (pool warm)'; es.style.color = 'var(--ok)'; }
-    else { es.textContent = 'scraping feeds'; es.style.color = 'var(--info)'; }
+    if (quota.exhausted) { es.textContent = t('js.eng.paused_quota'); es.style.color = 'var(--bad)'; }
+    else if ((pool.queue ?? 0) > 0) { es.textContent = t('js.eng.probing') + ' (' + pool.queue + ' ' + t('js.eng.queued') + ')'; es.style.color = 'var(--warn)'; }
+    else if ((pool.warm ?? 0) >= poolTarget) { es.textContent = t('js.eng.idle_warm'); es.style.color = 'var(--ok)'; }
+    else { es.textContent = t('js.eng.scraping'); es.style.color = 'var(--info)'; }
   }
 
   const foot = document.getElementById('footStatus');
-  if (foot) foot.textContent = 'v' + (data.version || '') + ' · ' + (pool.warm ?? 0) + ' warm / '
-    + (pool.subnets ?? 0) + ' subnets · updated ' + new Date().toLocaleTimeString();
+  if (foot) foot.textContent = 'v' + (data.version || '') + ' · ' + (pool.warm ?? 0) + ' ' + t('js.foot.warm') + ' / '
+    + (pool.subnets ?? 0) + ' ' + t('js.foot.subnets') + ' · ' + t('js.foot.updated') + ' ' + new Date().toLocaleTimeString();
 
   // Announce meaningful pool changes once, not on every tick.
   const warmNow = pool.warm ?? 0;
@@ -2302,18 +2310,28 @@ const I18N = {
   "js.burn_off": "burn off",
   "js.burned_ips": "burned IPs",
   "js.cleared": "Log cleared",
+  "js.concentrated": "concentrated",
   "js.cooldown": "cooldown",
   "js.copied": "Copied to clipboard",
   "js.diag_refreshed": "Diagnostics refreshed",
   "js.discovering": "discovering routes…",
+  "js.eng.idle_warm": "idle (pool warm)",
+  "js.eng.paused_quota": "paused (quota)",
+  "js.eng.probing": "probing",
+  "js.eng.queued": "queued",
+  "js.eng.scraping": "scraping feeds",
   "js.errors_of": "errors /",
   "js.failed": "failed",
   "js.failovers": "failovers",
   "js.fast": "fast",
   "js.fix_invalid": "Fix the invalid fields before applying",
+  "js.foot.subnets": "subnets",
+  "js.foot.updated": "updated",
+  "js.foot.warm": "warm",
   "js.idle_warm": "idle (pool warm)",
   "js.in_prefix": "in",
   "js.in_window": "in",
+  "js.lanes_per_24": "lanes per /24",
   "js.lanes_suffix": "lanes",
   "js.lifetime": "lifetime",
   "js.loading": "Loading…",
@@ -2327,6 +2345,7 @@ const I18N = {
   "js.now": "now",
   "js.operational": "operational",
   "js.out_prefix": "out",
+  "js.parked": "parked",
   "js.paused_quota": "paused (quota)",
   "js.per_req": "/req",
   "js.polling_fallback": "polling fallback",
@@ -2336,6 +2355,7 @@ const I18N = {
   "js.proxies": "proxies",
   "js.queued": "queued",
   "js.quota_exhausted": "quota exhausted · retry in",
+  "js.real_pool_width": "real pool width",
   "js.refresh_started": "Proxy refresh started",
   "js.req": "req",
   "js.requests_total": "requests total",
@@ -2343,6 +2363,7 @@ const I18N = {
   "js.saving": "Saving…",
   "js.scraping": "scraping feeds",
   "js.settings_saved": "Settings applied",
+  "js.slots": "slots",
   "js.slow": "slow",
   "js.tor_off": "tor off",
   "js.tor_unreachable": "tor UNREACHABLE",
@@ -2492,18 +2513,28 @@ const I18N = {
   "js.burn_off": "حافظه‌ی سوخته خاموش",
   "js.burned_ips": "IP سوخته",
   "js.cleared": "گزارش پاک شد",
+  "js.concentrated": "متمرکز",
   "js.cooldown": "استراحت",
   "js.copied": "در بریده‌دان رونوشت شد",
   "js.diag_refreshed": "عیب‌یابی به‌روز شد",
   "js.discovering": "کشف مسیرها…",
+  "js.eng.idle_warm": "بی‌کار (استخر آماده)",
+  "js.eng.paused_quota": "متوقف (سهمیه)",
+  "js.eng.probing": "در حال پروب",
+  "js.eng.queued": "در صف",
+  "js.eng.scraping": "در حال جمع‌آوری از منابع",
   "js.errors_of": "خطا از",
   "js.failed": "ناموفق",
   "js.failovers": "جابه‌جایی اضطراری",
   "js.fast": "سریع",
   "js.fix_invalid": "پیش از اعمال، فیلدهای نامعتبر را درست کنید",
+  "js.foot.subnets": "زیرشبکه",
+  "js.foot.updated": "به‌روزرسانی",
+  "js.foot.warm": "آماده",
   "js.idle_warm": "بی‌کار (استخر آماده)",
   "js.in_prefix": "ورودی",
   "js.in_window": "در",
+  "js.lanes_per_24": "مسیر در هر /24",
   "js.lanes_suffix": "مسیر",
   "js.lifetime": "از ابتدا",
   "js.loading": "در حال بارگذاری…",
@@ -2517,6 +2548,7 @@ const I18N = {
   "js.now": "اکنون",
   "js.operational": "عملیاتی",
   "js.out_prefix": "خروجی",
+  "js.parked": "پارک‌شده",
   "js.paused_quota": "متوقف (سهمیه)",
   "js.per_req": "به‌ازای هر درخواست",
   "js.polling_fallback": "بازگشت به نظرسنجی دوره‌ای",
@@ -2526,6 +2558,7 @@ const I18N = {
   "js.proxies": "پروکسی",
   "js.queued": "در صف",
   "js.quota_exhausted": "سهمیه تمام شد · تلاش مجدد در",
+  "js.real_pool_width": "پهنای واقعی استخر",
   "js.refresh_started": "به‌روزرسانی پروکسی‌ها آغاز شد",
   "js.req": "درخواست",
   "js.requests_total": "درخواست در کل",
@@ -2533,6 +2566,7 @@ const I18N = {
   "js.saving": "در حال ذخیره…",
   "js.scraping": "خواندن فهرست‌ها",
   "js.settings_saved": "تنظیمات اعمال شد",
+  "js.slots": "جایگاه",
   "js.slow": "کند",
   "js.tor_off": "Tor خاموش",
   "js.tor_unreachable": "Tor دست‌نیافتنی",
@@ -3295,9 +3329,9 @@ function animNetworkGraph(ts) {
     // Particles are part of the liquid: they read as droplets travelling the
     // neck and being absorbed, instead of dots sliding over a line.
     netParticles.forEach(p => {
-      const t = p.progress;
-      const px = (1 - t) * (1 - t) * cx + 2 * (1 - t) * t * p.cpX + t * t * p.target.x;
-      const py = (1 - t) * (1 - t) * cy + 2 * (1 - t) * t * p.cpY + t * t * p.target.y;
+      const bt = p.progress;   // bezier parameter, not the t() translator
+      const px = (1 - bt) * (1 - bt) * cx + 2 * (1 - bt) * bt * p.cpX + bt * bt * p.target.x;
+      const py = (1 - bt) * (1 - bt) * cy + 2 * (1 - bt) * bt * p.cpY + bt * bt * p.target.y;
       const scale = (p.target.z + 1.8) / 2.8;
       gooCtx.fillStyle = p.err ? 'rgba(255,138,144,0.95)' : hexA(p.target.color, 0.95);
       gooCtx.beginPath();
@@ -3377,9 +3411,9 @@ function animNetworkGraph(ts) {
   for (let i = netParticles.length - 1; i >= 0; i--) {
     const p = netParticles[i];
     p.progress += p.speed * dt;
-    const t = p.progress;
-    const px = (1 - t) * (1 - t) * cx + 2 * (1 - t) * t * p.cpX + t * t * p.target.x;
-    const py = (1 - t) * (1 - t) * cy + 2 * (1 - t) * t * p.cpY + t * t * p.target.y;
+    const bt = p.progress;   // bezier parameter, not the t() translator
+    const px = (1 - bt) * (1 - bt) * cx + 2 * (1 - bt) * bt * p.cpX + bt * bt * p.target.x;
+    const py = (1 - bt) * (1 - bt) * cy + 2 * (1 - bt) * bt * p.cpY + bt * bt * p.target.y;
     const scale = (p.target.z + 1.8) / 2.8;
     const col = p.err ? '#ff8a90' : p.target.color;
     if (!goo) { netCtx.shadowBlur = 8 * scale; netCtx.shadowColor = col; }

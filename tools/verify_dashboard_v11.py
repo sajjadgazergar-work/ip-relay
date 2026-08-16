@@ -115,6 +115,12 @@ async def main() -> int:
           const bad = [];
           document.querySelectorAll('[data-i18n]').forEach(e => {
             const t = e.textContent.trim();
+            // Skip content that SHOULD stay Latin: the base URL, IPs, hostnames
+            // and monospace telemetry. #baseUrlVal starts life as a translated
+            // placeholder and is then overwritten with the relay's own URL —
+            // asserting Persian there would demand a translated hostname.
+            if (e.id === 'baseUrlVal') return;
+            if (/^[\\w.:\\/-]+$/.test(t)) return;
             if (/^[\\x00-\\x7F]+$/.test(t) && /[A-Za-z]{4}/.test(t))
               bad.push(e.getAttribute('data-i18n'));
           });

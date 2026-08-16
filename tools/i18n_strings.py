@@ -283,4 +283,22 @@ JS_STRINGS: list[tuple[str, str, str]] = [
     ("js.in_window", "in", "در"),
     ("js.min", "min", "دقیقه"),
     ("js.polling_fallback", "polling fallback", "بازگشت به نظرسنجی دوره‌ای"),
+
+    # These three overwrite an element that ALSO carries data-i18n. The attribute
+    # alone is not enough: the render path rewrites textContent on every poll, so
+    # the English rebuilt itself ~5s after a language switch. Verified by the
+    # browser harness (hdr.loading, m.realwidth, t.idle were the last holdouts).
+    ("js.parked", "parked", "پارک‌شده"),
+    ("js.slots", "slots", "جایگاه"),
+    ("js.concentrated", "concentrated", "متمرکز"),
+    ("js.lanes_per_24", "lanes per /24", "مسیر در هر /24"),
+    ("js.real_pool_width", "real pool width", "پهنای واقعی استخر"),
+    ("js.eng.paused_quota", "paused (quota)", "متوقف (سهمیه)"),
+    ("js.eng.probing", "probing", "در حال پروب"),
+    ("js.eng.queued", "queued", "در صف"),
+    ("js.eng.idle_warm", "idle (pool warm)", "بی‌کار (استخر آماده)"),
+    ("js.eng.scraping", "scraping feeds", "در حال جمع‌آوری از منابع"),
+    ("js.foot.warm", "warm", "آماده"),
+    ("js.foot.subnets", "subnets", "زیرشبکه"),
+    ("js.foot.updated", "updated", "به‌روزرسانی"),
 ]
